@@ -301,7 +301,7 @@ if compute_button_clicked and st.session_state.fg_geojson:
     except Exception as e:
         st.error(f"Failed to compute zones: {e}")
 elif compute_button_clicked and not st.session_state.fg_geojson:
-    st.warning("Please save your FG polygon first before computing zones.")
+    st.warning("Please save your FG polygon before computing zones.")
 
 
 # --------------- FG readout ---------------
