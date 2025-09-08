@@ -15,6 +15,12 @@ from shapely.ops import unary_union
 from shapely.validation import make_valid
 from pyproj import Transformer
 
+import io
+import zipfile 
+import tempfile
+from datetime import datetime
+import simplekml
+
 st.set_page_config(page_title="DOZE — Zones Preview", layout="wide")
 
 st.title("DOZE — Draw Flight Geography (FG)")
@@ -29,12 +35,14 @@ MAX_HEIGHT_AGL_M = 120.0
 def cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m) -> float:
     theta_rad = math.radians(max(1e-6, theta_deg))
     s_rz = v0_ms * max(0.0, t_react_s)
-    s_cm = (v0_ms**2) / (G * math.tan(theta_rad))
+    print(s_rz)
+    s_cm = 0.5*((v0_ms**2) / (G * math.tan(theta_rad)))
+    print(s_cm)
     return s_gps_m + s_pos_m + s_map_m + s_rz + s_cm
 
 def cv_vertical_multirotor(h_fg_m, v0_ms, t_react_s, h_baro_m) -> float:
     h_rz = v0_ms * 0.7 * max(0.0, t_react_s)
-    h_cm = (v0_ms**2) / (2.0 * G)
+    h_cm = 0.5*((v0_ms**2) / (2.0 * G))
     return h_fg_m + h_baro_m + h_rz + h_cm
 
 # ---- GRB models (multirotor) per your table ----
@@ -124,35 +132,190 @@ theta_deg = st.sidebar.number_input("Max pitch θ (deg)", 1.0, 45.0, 35.0, 1.0)
 s_gps_m = st.sidebar.number_input("GPS inaccuracy S_GPS (m)", 0.0, 10.0, 3.0, 0.5)
 s_pos_m = st.sidebar.number_input("Position hold error S_pos (m)", 0.0, 10.0, 0.3, 0.5)
 s_map_m = st.sidebar.number_input("Map error S_K (m)", 0.0, 10.0, 1.0, 0.5)
+cv_m = cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m)
+st.sidebar.metric("Lateral CV margin (m)", f"{cv_m:.1f}")
+
 
 st.sidebar.divider()
-h_fg_m = st.sidebar.number_input("Max flight height (m AGL)", 0.0, 150.0, MAX_HEIGHT_AGL_M, 1.0)
+st.sidebar.header("Vertical Zone Calculation")
+
+# The user now sets the maximum allowed height of the Contingency Volume (the regulatory ceiling).
+max_h_cv_m = st.sidebar.number_input(
+    "Max Contingency Volume Height (H_CV) (m AGL)", 
+    0.0, 200.0, MAX_HEIGHT_AGL_M, 1.0,
+    help="This is the regulatory ceiling (e.g., 120m). The maximum flight height (FG) will be calculated by subtracting the required vertical buffer from this value."
+)
+
 h_baro_mode = st.sidebar.selectbox("Altitude measurement", ["Barometric (1 m)", "GPS-based (4 m)"], index=0)
 h_baro_m = 1.0 if "Barometric" in h_baro_mode else 4.0
 
-cv_m = cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m)
-h_cv_m = cv_vertical_multirotor(h_fg_m, v0_ms, t_react_s, h_baro_m)
+# Calculate the components of the vertical buffer
+h_rz = v0_ms * 0.7 * max(0.0, t_react_s)
+h_cm = (v0_ms**2) / (2.0 * G)
+vertical_buffer_m = h_baro_m + h_rz + h_cm
 
-st.sidebar.metric("Lateral CV margin (m)", f"{cv_m:.1f}")
-st.sidebar.metric("Vertical CV apex H_CV (m AGL)", f"{h_cv_m:.1f}")
+# Calculate the resulting max flight height (H_FG) by working backwards
+calculated_h_fg_m = max_h_cv_m - vertical_buffer_m
+
+# Display the results clearly to the user
+st.sidebar.metric("Vertical CV Apex H_CV (m AGL)", f"{max_h_cv_m:.1f}")
+st.sidebar.info(f"Required Vertical Buffer: {vertical_buffer_m:.1f} m\n(H_baro + H_RZ + H_CM)")
+
+# Provide a clear metric for the calculated H_FG and handle infeasible scenarios
+if calculated_h_fg_m < 0:
+    st.sidebar.metric("Calculated Max Flight Height H_FG (m AGL)", f"{calculated_h_fg_m:.1f}")
+    st.sidebar.error("Flight not possible! The required vertical buffer is larger than the regulatory ceiling. Reduce speed or reaction time.")
+    # Clamp to zero for calculations to prevent errors, though flight is not advised
+    calculated_h_fg_m = 0.0 
+else:
+    st.sidebar.metric("Calculated Max Flight Height H_FG (m AGL)", f"{calculated_h_fg_m:.1f}")
+
 
 st.sidebar.header("GRB (Multirotor)")
 cd_m = st.sidebar.number_input("Characteristic dimension CD (m) [needs to be checked with m30]", 0.0, 10.0, 0.6, 0.1)
 grb_method = st.sidebar.selectbox("Method", ["Simplified (1:1)", "Ballistic"], index=1)
 
 if grb_method.startswith("Simplified"):
-    grb_margin = grb_simplified(h_cv_m, cd_m)
+    # GRB is based on the final H_CV
+    grb_margin = grb_simplified(max_h_cv_m, cd_m)
 else:
-    grb_margin = grb_ballistic(v0_ms, h_cv_m, cd_m)
+    grb_margin = grb_ballistic(v0_ms, max_h_cv_m, cd_m)
 
 st.sidebar.metric("GRB margin (m)", f"{grb_margin:.1f}")
 
-# ... (previous imports and helper functions)
+# ---- KML/KMZ helpers ----
+
+def _kml_color(hex_rgb: str, opacity: float = 0.6) -> str:
+    """
+    Convert '#RRGGBB' + opacity [0..1] to KML aabbggrr.
+    KML expects little-endian ARGB in hex.
+    """
+    hex_rgb = hex_rgb.lstrip("#")
+    r = int(hex_rgb[0:2], 16)
+    g = int(hex_rgb[2:4], 16)
+    b = int(hex_rgb[4:6], 16)
+    a = int(max(0, min(255, round(opacity * 255))))
+    return f"{a:02x}{b:02x}{g:02x}{r:02x}"
+
+    
+def _add_geojson_polygon_to_kml_folder(
+    fol: simplekml.Folder,
+    feature: dict,
+    name: str,
+    line_hex: str,
+    fill_opacity: float,
+    height_m: float,
+    extrude: bool,
+):
+    """
+    Adds a (Multi)Polygon GeoJSON feature to a KML folder.
+    - If extrude=True, creates a 3D volume up to height_m.
+    - If extrude=False, creates a 2D polygon clamped to the ground.
+    """
+    geom = feature["geometry"]
+    gtype = geom["type"].lower()
+    ringsets = []
+    if gtype == "polygon":
+        ringsets = [geom["coordinates"]]
+    elif gtype == "multipolygon":
+        ringsets = geom["coordinates"]
+    else:
+        return
+
+    for idx, rings in enumerate(ringsets, start=1):
+        pol = fol.newpolygon(name=f"{name} {idx}" if len(ringsets) > 1 else name)
+        
+        outer = rings[0]
+        holes = rings[1:] if len(rings) > 1 else []
+
+        if extrude:
+            # For 3D volumes (FG, CV, OV)
+            pol.outerboundaryis = [(lon, lat, height_m) for lon, lat in outer]
+            if holes:
+                pol.innerboundaryis = [
+                    [(lon, lat, height_m) for lon, lat in hole] for hole in holes
+                ]
+            pol.altitudemode = simplekml.AltitudeMode.relativetoground
+            pol.extrude = 1
+        else:
+            # For 2D ground areas (GRB)
+            pol.outerboundaryis = outer
+            if holes:
+                pol.innerboundaryis = holes
+            pol.altitudemode = simplekml.AltitudeMode.clamptoground
+            pol.extrude = 0
+
+        # Style applies to both
+        pol.style.linestyle.color = _kml_color(line_hex, 1.0)
+        pol.style.linestyle.width = 2
+        pol.style.polystyle.color = _kml_color(line_hex, fill_opacity)
+
+  
+
+    
+def write_kmz(zones: dict, params: dict) -> bytes:
+    """
+    Build a KMZ from zones (FG/CV/OV/GRB) and return its content as bytes.
+    This version creates volumes with zone-specific heights.
+    """
+    kml = simplekml.Kml()
+    kml.document.name = f"DOZE Export {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    kml.document.description = (
+        "DOZE — Drone Operation Zone Editor\n"
+        "Based on LBA FG/CV/GRB guidance and EU 2019/947.\n\n"
+        f"Parameters:\n{json.dumps(params, indent=2)}"
+    )
+
+    palette = {
+        "FG":  ("#15c048", 0.8),
+        "CV":  ("#ff9800", 0.5),
+        "OV":  ("#42a5f5", 0.05),
+        "GRB": ("#e53935", 0.9),
+    }
+
+    # Define the vertical properties for each zone from the passed parameters
+    h_fg = params.get('h_fg_m', MAX_HEIGHT_AGL_M)
+    h_cv = params.get('h_cv_m', h_fg + 10) # Use calculated H_CV
+
+    zone_properties = {
+        "FG":  {"height": h_fg, "extrude": True},
+        "CV":  {"height": h_cv, "extrude": True},
+        "OV":  {"height": h_cv, "extrude": True},  # OV's ceiling is the CV's ceiling
+        "GRB": {"height": 0,    "extrude": False}, # Clamped to ground, no extrusion
+    }
+
+    # One folder per layer, applying the correct properties
+    for layer in ["FG", "CV", "OV", "GRB"]:
+        if layer not in zones or not zones[layer]:
+            continue
+        
+        props = zone_properties[layer]
+        fol = kml.newfolder(name=layer)
+        _add_geojson_polygon_to_kml_folder(
+            fol=fol,
+            feature=zones[layer],
+            name=layer,
+            line_hex=palette[layer][0],
+            fill_opacity=palette[layer][1],
+            height_m=props["height"],
+            extrude=props["extrude"],
+        )
+    # In-memory KMZ creation (remains the same)
+    kml_content_bytes = kml.kml().encode('utf-8')
+    in_memory_file = io.BytesIO()
+    with zipfile.ZipFile(in_memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('doc.kml', kml_content_bytes)
+    in_memory_file.seek(0)
+    return in_memory_file.read()
+
+  
+
 
 # ----------------- Session state & map -----------------
 st.session_state.setdefault("fg_geojson", None)
 st.session_state.setdefault("zones", None)
-st.session_state.setdefault("zones_bounds", None)  # (minx, miny, maxx, maxy) in WGS84
+st.session_state.setdefault("zones_bounds", None)  
+st.session_state.setdefault("export_params", None) 
 
 st.markdown("**Instructions**")
 st.markdown(
@@ -285,6 +448,26 @@ if compute_button_clicked and st.session_state.fg_geojson:
         minx, miny, maxx, maxy = grb_geom.bounds  # use widest layer
         st.session_state.zones_bounds = (minx, miny, maxx, maxy)
 
+        st.session_state.export_params = {
+            "h_fg_m": calculated_h_fg_m,  
+            "h_cv_m": max_h_cv_m,         
+            "v0_ms": v0_ms,
+            "t_react_s": t_react_s,
+            "theta_deg": theta_deg,
+            "s_gps_m": s_gps_m,
+            "s_pos_m": s_pos_m,
+            "s_map_m": s_map_m,
+            "cv_m": round(cv_m, 2),
+            "cd_m": cd_m,
+            "grb_method": grb_method,
+            "grb_margin_m": round(grb_margin, 2),
+            "crs_buffering": "EPSG:28992 (RD New)",
+            "altitude_mode": "relativeToGround",
+            "extrude_top_m": MAX_HEIGHT_AGL_M, 
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+
+
         st.subheader("Metrics (projected in EPSG:28992)")
         st.write(
             f"- **FG**: area {fg_area:,.0f} m² • perimeter {fg_perim:,.0f} m\n"
@@ -293,16 +476,30 @@ if compute_button_clicked and st.session_state.fg_geojson:
             f"- **GRB**: area {grb_area:,.0f} m² • perimeter {grb_perim:,.0f} m"
         )
         st.success("Zones computed. They’re drawn on the main map above.")
-        
-        # Rerun to ensure the map object `m` gets updated with the new layers
-        # and fit_bounds is applied in the next st_folium render.
+
         st.rerun()
+
 
     except Exception as e:
         st.error(f"Failed to compute zones: {e}")
+        st.session_state.zones = None # Clear on failure
+        st.session_state.export_params = None
+
 elif compute_button_clicked and not st.session_state.fg_geojson:
     st.warning("Please save your FG polygon before computing zones.")
+if st.session_state.zones:
+    st.divider()
+    st.subheader("Export Zones")
 
+    # Generate the KMZ data on-the-fly for the download button
+    kmz_bytes = write_kmz(st.session_state.zones, st.session_state.export_params)
+    
+    st.download_button(
+        label="Download KMZ (3D extruded to 120 m)",
+        data=kmz_bytes,
+        file_name=f"DOZE_zones_{datetime.now().strftime('%Y%m%d_%H%M')}.kmz",
+        mime="application/vnd.google-earth.kmz",
+    )
 
 # --------------- FG readout ---------------
 st.subheader("Current FG (captured)")
