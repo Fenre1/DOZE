@@ -31,6 +31,9 @@ st.caption("This application DOES NOT take into account locations where you are 
 # ----------------- Constants & helpers -----------------
 G = 9.81
 MAX_HEIGHT_AGL_M = 120.0
+FG_TOP_CAP_M = 120.0  # FG cannot exceed this
+CV_TOP_CAP_M = 150.0  # CV apex cannot exceed this (FG + buffer)
+GRB_PRISM_HEIGHT_M = 10.0  
 
 def cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m) -> float:
     theta_rad = math.radians(max(1e-6, theta_deg))
@@ -138,48 +141,46 @@ st.sidebar.metric("Lateral CV margin (m)", f"{cv_m:.1f}")
 
 st.sidebar.divider()
 st.sidebar.header("Vertical Zone Calculation")
-
-# The user now sets the maximum allowed height of the Contingency Volume (the regulatory ceiling).
-max_h_cv_m = st.sidebar.number_input(
-    "Max Contingency Volume Height (H_CV) (m AGL)", 
-    0.0, 200.0, MAX_HEIGHT_AGL_M, 1.0,
-    help="This is the regulatory ceiling (e.g., 120m). The maximum flight height (FG) will be calculated by subtracting the required vertical buffer from this value."
+planned_fg_input_m = st.sidebar.number_input("Planned maximum flight height (m)", 0.0, 120.0, 50.0, 1.0,
+    help="Your planned maximum flight height (up to 120 m). It will be lowered automatically if FG + buffer would exceed the 150 m CV apex."
 )
-
 h_baro_mode = st.sidebar.selectbox("Altitude measurement", ["Barometric (1 m)", "GPS-based (4 m)"], index=0)
 h_baro_m = 1.0 if "Barometric" in h_baro_mode else 4.0
 
-# Calculate the components of the vertical buffer
+# --- Vertical buffer components ---
 h_rz = v0_ms * 0.7 * max(0.0, t_react_s)
-h_cm = (v0_ms**2) / (2.0 * G)
+h_cm = 0.5 * ((v0_ms**2) / (2.0 * G))  # keep consistent with the rest of your file
 vertical_buffer_m = h_baro_m + h_rz + h_cm
 
-# Calculate the resulting max flight height (H_FG) by working backwards
-calculated_h_fg_m = max_h_cv_m - vertical_buffer_m
+# --- Apply constraints ---
+allowed_fg_by_cv = max(0.0, CV_TOP_CAP_M - vertical_buffer_m)   # FG must also satisfy FG + buffer ≤ 150
+fg_user_capped   = min(FG_TOP_CAP_M, planned_fg_input_m)         # never above 120 (UI already enforces)
+calculated_h_fg_m = max(0.0, min(fg_user_capped, allowed_fg_by_cv))
+h_cv_apex_m = calculated_h_fg_m + vertical_buffer_m              # ≤ 150 by construction
 
-# Display the results clearly to the user
-st.sidebar.metric("Vertical CV Apex H_CV (m AGL)", f"{max_h_cv_m:.1f}")
-st.sidebar.info(f"Required Vertical Buffer: {vertical_buffer_m:.1f} m\n(H_baro + H_RZ + H_CM)")
+# Readout
+st.sidebar.metric("Planned FG (user input)", f"{planned_fg_input_m:.1f} m")
+st.sidebar.metric("Required Vertical Buffer", f"{vertical_buffer_m:.1f} m")
+st.sidebar.metric("Resulting FG apex H_FG", f"{calculated_h_fg_m:.1f} m")
+st.sidebar.metric("Resulting CV apex H_CV", f"{h_cv_apex_m:.1f} m")
 
-# Provide a clear metric for the calculated H_FG and handle infeasible scenarios
-if calculated_h_fg_m < 0:
-    st.sidebar.metric("Calculated Max Flight Height H_FG (m AGL)", f"{calculated_h_fg_m:.1f}")
-    st.sidebar.error("Flight not possible! The required vertical buffer is larger than the regulatory ceiling. Reduce speed or reaction time.")
-    # Clamp to zero for calculations to prevent errors, though flight is not advised
-    calculated_h_fg_m = 0.0 
-else:
-    st.sidebar.metric("Calculated Max Flight Height H_FG (m AGL)", f"{calculated_h_fg_m:.1f}")
-
+# Warnings / notes
+if planned_fg_input_m > allowed_fg_by_cv + 1e-6:
+    st.sidebar.warning(
+        f"Planned FG reduced from {planned_fg_input_m:.1f} m to {calculated_h_fg_m:.1f} m "
+        f"to keep CV apex ≤ {CV_TOP_CAP_M:.0f} m."
+    )
+if calculated_h_fg_m <= 0:
+    st.sidebar.error("Flight not possible: buffer alone exceeds the CV ceiling of 150 m. Reduce speed or reaction time.")
 
 st.sidebar.header("GRB (Multirotor)")
 cd_m = st.sidebar.number_input("Characteristic dimension CD (m) [needs to be checked with m30]", 0.0, 10.0, 0.6, 0.1)
 grb_method = st.sidebar.selectbox("Method", ["Simplified (1:1)", "Ballistic"], index=1)
 
 if grb_method.startswith("Simplified"):
-    # GRB is based on the final H_CV
-    grb_margin = grb_simplified(max_h_cv_m, cd_m)
+    grb_margin = grb_simplified(h_cv_apex_m, cd_m)
 else:
-    grb_margin = grb_ballistic(v0_ms, max_h_cv_m, cd_m)
+    grb_margin = grb_ballistic(v0_ms, h_cv_apex_m, cd_m)
 
 st.sidebar.metric("GRB margin (m)", f"{grb_margin:.1f}")
 
@@ -274,14 +275,14 @@ def write_kmz(zones: dict, params: dict) -> bytes:
     }
 
     # Define the vertical properties for each zone from the passed parameters
-    h_fg = params.get('h_fg_m', MAX_HEIGHT_AGL_M)
-    h_cv = params.get('h_cv_m', h_fg + 10) # Use calculated H_CV
+    h_fg = params['h_fg_m']
+    h_cv = params['h_cv_m']
 
     zone_properties = {
-        "FG":  {"height": h_fg, "extrude": True},
-        "CV":  {"height": h_cv, "extrude": True},
-        "OV":  {"height": h_cv, "extrude": True},  # OV's ceiling is the CV's ceiling
-        "GRB": {"height": 0,    "extrude": False}, # Clamped to ground, no extrusion
+        "FG":  {"height": h_fg,                 "extrude": True},
+        "CV":  {"height": h_cv,                 "extrude": True},
+        "OV":  {"height": h_cv,                 "extrude": True},   # OV up to CV
+        "GRB": {"height": GRB_PRISM_HEIGHT_M,   "extrude": True},   # << was 0 / False
     }
 
     # One folder per layer, applying the correct properties
@@ -449,8 +450,8 @@ if compute_button_clicked and st.session_state.fg_geojson:
         st.session_state.zones_bounds = (minx, miny, maxx, maxy)
 
         st.session_state.export_params = {
-            "h_fg_m": calculated_h_fg_m,  
-            "h_cv_m": max_h_cv_m,         
+            "h_fg_m": calculated_h_fg_m,
+            "h_cv_m": h_cv_apex_m,   # use the derived CV apex
             "v0_ms": v0_ms,
             "t_react_s": t_react_s,
             "theta_deg": theta_deg,
@@ -463,7 +464,7 @@ if compute_button_clicked and st.session_state.fg_geojson:
             "grb_margin_m": round(grb_margin, 2),
             "crs_buffering": "EPSG:28992 (RD New)",
             "altitude_mode": "relativeToGround",
-            "extrude_top_m": MAX_HEIGHT_AGL_M, 
+            # Drop 'extrude_top_m' or set it to h_cv_apex_m if you want it reflected in metadata
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
 
@@ -495,7 +496,7 @@ if st.session_state.zones:
     kmz_bytes = write_kmz(st.session_state.zones, st.session_state.export_params)
     
     st.download_button(
-        label="Download KMZ (3D extruded to 120 m)",
+        label=f"Download KMZ (FG {calculated_h_fg_m:.0f} m, CV {h_cv_apex_m:.0f} m)",
         data=kmz_bytes,
         file_name=f"DOZE_zones_{datetime.now().strftime('%Y%m%d_%H%M')}.kmz",
         mime="application/vnd.google-earth.kmz",
