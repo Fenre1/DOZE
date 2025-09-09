@@ -10,7 +10,7 @@ import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
 
-from shapely.geometry import shape, mapping, Polygon, MultiPolygon
+from shapely.geometry import shape, mapping, Polygon, MultiPolygon, GeometryCollection
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 from pyproj import Transformer
@@ -23,17 +23,17 @@ import simplekml
 
 st.set_page_config(page_title="DOZE — Zones Preview", layout="wide")
 
-st.title("DOZE — Draw Flight Geography (FG)")
-st.caption("Drone Operation Zone Editor - Based on https://www.lba.de/SharedDocs/Downloads/DE/B/B5_UAS/Leitfaden_FG_CV_GRB_eng.pdf which are in turn based on Regulation (EU) 2019/947.")
+st.title("DOZE — Drone Operation Zone Editor")
+st.caption("Create a flight geometry - Based on https://www.lba.de/SharedDocs/Downloads/DE/B/B5_UAS/Leitfaden_FG_CV_GRB_eng.pdf which are in turn based on Regulation (EU) 2019/947.")
 st.caption("This application DOES NOT take into account locations where you are and are not allowed to fly.")
 
 
-# ----------------- Constants & helpers -----------------
+# Constants & helpers
 G = 9.81
 MAX_HEIGHT_AGL_M = 120.0
 FG_TOP_CAP_M = 120.0  # FG cannot exceed this
 CV_TOP_CAP_M = 150.0  # CV apex cannot exceed this (FG + buffer)
-GRB_PRISM_HEIGHT_M = 10.0  
+GRB_PRISM_HEIGHT_M = 10.0 # height for GBR, so that it goes above Google Earth's 3d buildings.
 
 DRONE_PROFILES = {
     "DJI Matrice 30": {
@@ -148,12 +148,35 @@ def buffer_m(geom_wgs, radius_m: float, cap_style=1, join_style=1):
     buf = rd.buffer(radius_m, cap_style=cap_style, join_style=join_style)
     return unproject_geom(buf)
 
+def offset_m(geom_wgs, offset_meters: float, cap_style=1, join_style=1):
+    """Positive = outward, negative = inward, using RD New. Returns None if empty."""
+    rd = project_geom(geom_wgs)
+    buf = rd.buffer(offset_meters, cap_style=cap_style, join_style=join_style)
+    if buf.is_empty:
+        return None
+    # Keep only polygonal surfaces if a GeometryCollection occurs
+    if isinstance(buf, GeometryCollection):
+        polys = [g for g in buf.geoms if isinstance(g, (Polygon, MultiPolygon))]
+        if not polys:
+            return None
+        buf = unary_union(polys)
+    return unproject_geom(buf)
+
 def area_perimeter_m(geom_wgs) -> Tuple[float, float]:
     """Return (area_m2, perimeter_m) using RD New for metric accuracy."""
     rd = project_geom(geom_wgs)
     return float(rd.area), float(rd.length)
 
 # ----------------- Sidebar controls -----------------
+# What does the drawn polygon represent?
+st.sidebar.header("Drawing mode")
+st.session_state["input_layer"] = st.sidebar.radio(
+    "The polygon I draw represents:",
+    ["FG", "CV", "GRB"],
+    horizontal=True,
+    index=["FG", "CV", "GRB"].index(st.session_state.get("input_layer", "FG")),
+)
+
 
 st.sidebar.header("Flight Height")
 planned_fg_input_m = st.sidebar.number_input("Planned maximum flight height (m)", 0.0, 120.0, 50.0, 1.0,
@@ -447,19 +470,21 @@ def write_kmz(zones: dict, params: dict) -> bytes:
 
 
 # ----------------- Session state & map -----------------
-st.session_state.setdefault("fg_geojson", None)
+st.session_state.setdefault("input_geojson", None)     # what the user drew
+st.session_state.setdefault("input_layer", "FG")       # FG | CV | GRB
 st.session_state.setdefault("zones", None)
-st.session_state.setdefault("zones_bounds", None)  
-st.session_state.setdefault("export_params", None) 
+st.session_state.setdefault("zones_bounds", None)
+st.session_state.setdefault("export_params", None)
 
 st.markdown("**Instructions**")
 st.markdown(
-    "1) Draw your FG polygon with the tool.\n"
-    "2) Click **Save FG**.\n"
-    "3) Click **Compute Zones** to preview CV, OV, GRB..\n"
-    "4) Click **Download KMZ**.\n"
-    "5) Open .kmz in Google Earth"
+    "1) Choose what your polygon represents: Flight Geometry (FG), Contingency Volume (CV), or Ground Risk Buffer (GRB).\n"
+    "2) Draw the polygon with the tool.\n"
+    "3) Click **Save**.\n"
+    "4) Click **Compute Zones** to derive the other boundaries.\n"
+    "5) Click **Download KMZ** and open it in Google Earth."
 )
+
 
 # Define colors for zones
 colors = {
@@ -490,30 +515,40 @@ draw = Draw(
 )
 draw.add_to(m)
 
-# Add saved FG if it exists
-if st.session_state.fg_geojson:
+if st.session_state.input_geojson:
+    saved_name = f"{st.session_state.input_layer} (saved)"
+    this_color = {
+        "FG":  "#1565c0",
+        "CV":  "#ff9800",
+        "OV":  "#42a5f5",
+        "GRB": "#e53935",
+    }.get(st.session_state.input_layer, "#1565c0")
+
     folium.GeoJson(
-        st.session_state.fg_geojson,
-        name="FG (saved)",
-        style_function=lambda _: {"color": "#1565c0", "weight": 3, "fillOpacity": 0.15},
-        tooltip="FG (saved)",
+        st.session_state.input_geojson,
+        name=saved_name,
+        style_function=lambda _: {"color": this_color, "weight": 3, "fillOpacity": 0.15},
+        tooltip=saved_name,
     ).add_to(m)
 
-# Add computed zones if they exist
+# Add computed zones (avoid duplicating the saved layer)
 if st.session_state.zones:
-    for name in ["CV", "OV", "GRB"]:
-        folium.GeoJson(
-            st.session_state.zones[name],
-            name=name,
-            style_function=(lambda _, n=name: {"color": colors[n]["color"], "weight": 3, "fillOpacity": colors[n]["fillOpacity"]}),
-            tooltip=name,
-        ).add_to(m)
+    for name in ["FG", "CV", "OV", "GRB"]:
+        if name in st.session_state.zones and st.session_state.zones[name]:
+            if name == st.session_state.get("input_layer"):
+                continue  # skip duplicating the saved layer
+            folium.GeoJson(
+                st.session_state.zones[name],
+                name=name,
+                style_function=(lambda _, n=name: {"color": colors[n]["color"], "weight": 3, "fillOpacity": colors[n]["fillOpacity"]}),
+                tooltip=name,
+            ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # Auto-zoom to the full zones extent
-    minx, miny, maxx, maxy = st.session_state.zones_bounds
-    m.fit_bounds([[miny, minx], [maxy, maxx]])
-
+    # Auto-zoom to the widest derived layer available
+    if st.session_state.zones_bounds:
+        minx, miny, maxx, maxy = st.session_state.zones_bounds
+        m.fit_bounds([[miny, minx], [maxy, maxx]])
 
 map_data = st_folium(
     m,
@@ -533,22 +568,22 @@ def get_current_polygon_feature(md: dict) -> Optional[dict]:
 col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
 
 with col1:
-    if st.button("Save FG", use_container_width=True):
+    if st.button(f"Save {st.session_state.input_layer}", use_container_width=True):
         feature = get_current_polygon_feature(map_data)
         if feature is None:
             st.warning("Please draw a polygon first (use the polygon tool).")
         else:
-            st.session_state.fg_geojson = {
+            st.session_state.input_geojson = {
                 "type": "Feature",
-                "properties": {"name": "FG", "source": "leaflet-draw"},
+                "properties": {"name": st.session_state.input_layer, "source": "leaflet-draw"},
                 "geometry": feature["geometry"],
             }
-            st.success("FG saved to session.")
+            st.success(f"{st.session_state.input_layer} saved to session.")
             st.rerun()
 
 with col2:
-    if st.button("Clear FG", use_container_width=True):
-        st.session_state.fg_geojson = None
+    if st.button("Clear Input", use_container_width=True):
+        st.session_state.input_geojson = None
         st.session_state.zones = None
         st.session_state.zones_bounds = None
         st.session_state.export_params = None
@@ -560,7 +595,6 @@ with col3:
 with col4:
     # Always show a Download KMZ control.
     if st.session_state.get("zones") and st.session_state.get("export_params"):
-        # Zones are ready → show real download button
         kmz_bytes = write_kmz(st.session_state.zones, st.session_state.export_params)
         st.download_button(
             label=f"Download KMZ (FG {calculated_h_fg_m:.0f} m, CV {h_cv_apex_m:.0f} m)",
@@ -571,110 +605,130 @@ with col4:
             key="download_kmz_ready",
         )
     else:
-        # Not ready → clickable button that instructs the user
         if st.button("Download KMZ", use_container_width=True, key="download_kmz_stub"):
-            if not st.session_state.get("fg_geojson"):
-                st.warning("Please draw and **Save FG** first.")
+            if not st.session_state.get("input_geojson"):
+                st.warning("Please draw and **Save** your polygon first.")
             else:
-                st.warning("Please click **Compute Zones** before downloading the KMZ.")    
+                st.warning("Please click **Compute Zones** before downloading the KMZ.")
+
     
 
 # --------------- Compute & render zones ---------------
 
-if compute_button_clicked and st.session_state.fg_geojson:
+if compute_button_clicked and st.session_state.input_geojson:
     try:
-        fg_geom = geojson_to_shapely_wgs(st.session_state.fg_geojson)
+        base_layer = st.session_state.input_layer
+        base_geom  = geojson_to_shapely_wgs(st.session_state.input_geojson)
 
-        cv_geom  = buffer_m(fg_geom, cv_m, cap_style=1, join_style=1)
-        ov_geom  = unary_union([fg_geom, cv_geom])
-        grb_geom = buffer_m(ov_geom, grb_margin, cap_style=1, join_style=1)
+        fg_geom = cv_geom = ov_geom = grb_geom = None
 
-        # Areas/perimeters
-        fg_area, fg_perim   = area_perimeter_m(fg_geom)
-        cv_area, cv_perim   = area_perimeter_m(cv_geom)
-        ov_area, ov_perim   = area_perimeter_m(ov_geom)
-        grb_area, grb_perim = area_perimeter_m(grb_geom)
+        if base_layer == "FG":
+            fg_geom = base_geom
+            cv_geom = buffer_m(fg_geom, cv_m, cap_style=1, join_style=1)
+            ov_geom = unary_union([fg_geom, cv_geom])  # typically equals CV
+            grb_geom = buffer_m(ov_geom, grb_margin, cap_style=1, join_style=1)
 
-        # Save zones as GeoJSON in session
-        zones_data = {
-            "FG":  shapely_wgs_to_geojson(fg_geom),
-            "CV":  shapely_wgs_to_geojson(cv_geom),
-            "OV":  shapely_wgs_to_geojson(ov_geom),
-            "GRB": shapely_wgs_to_geojson(grb_geom),
-        }
-        st.session_state.zones = zones_data
+        elif base_layer == "CV":
+            cv_geom = base_geom
+            fg_geom = offset_m(cv_geom, -cv_m, cap_style=1, join_style=1)
+            if fg_geom is None:
+                st.warning("The drawn CV is too narrow to derive an FG with the selected CV margin.")
+                ov_geom = cv_geom
+            else:
+                ov_geom = unary_union([fg_geom, cv_geom])
+            grb_geom = buffer_m(ov_geom, grb_margin, cap_style=1, join_style=1)
 
-        # Save bounds for fit_bounds
-        minx, miny, maxx, maxy = grb_geom.bounds  # use widest layer
-        st.session_state.zones_bounds = (minx, miny, maxx, maxy)
+        elif base_layer == "GRB":
+            grb_geom = base_geom
+            ov_geom = offset_m(grb_geom, -grb_margin, cap_style=1, join_style=1)
+            if ov_geom is None:
+                st.error("The drawn GRB is too narrow to derive an OV with the selected GRB margin.")
+            else:
+                cv_geom = ov_geom  # OV == CV in this model
+                fg_geom = offset_m(cv_geom, -cv_m, cap_style=1, join_style=1)
+                if fg_geom is None:
+                    st.warning("The derived OV is too narrow to derive an FG with the selected CV margin.")
 
-        st.session_state.export_params = {
-            "h_fg_m": calculated_h_fg_m,
-            "h_cv_m": h_cv_apex_m,   # use the derived CV apex
-            "v0_ms": v0_ms,
-            "t_react_s": t_react_s,
-            "theta_deg": theta_deg,
-            "s_gps_m": s_gps_m,
-            "s_pos_m": s_pos_m,
-            "s_map_m": s_map_m,
-            "cv_m": round(cv_m, 2),
-            "cd_m": cd_m,
-            "grb_method": grb_method,
-            "grb_margin_m": round(grb_margin, 2),
-            "crs_buffering": "EPSG:28992 (RD New)",
-            "altitude_mode": "relativeToGround",
-            # Drop 'extrude_top_m' or set it to h_cv_apex_m if you want it reflected in metadata
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        }
+        # Collect any successfully derived layers
+        zones_data = {}
+        if fg_geom:  zones_data["FG"]  = shapely_wgs_to_geojson(fg_geom)
+        if cv_geom:  zones_data["CV"]  = shapely_wgs_to_geojson(cv_geom)
+        if ov_geom:  zones_data["OV"]  = shapely_wgs_to_geojson(ov_geom)
+        if grb_geom: zones_data["GRB"] = shapely_wgs_to_geojson(grb_geom)
 
+        if not zones_data:
+            st.error("No valid zones could be computed. Adjust your margins or draw a larger polygon.")
+        else:
+            st.session_state.zones = zones_data
 
-        st.subheader("Metrics (projected in EPSG:28992)")
-        st.write(
-            f"- **FG**: area {fg_area:,.0f} m² • perimeter {fg_perim:,.0f} m\n"
-            f"- **CV**: area {cv_area:,.0f} m² • perimeter {cv_perim:,.0f} m\n"
-            f"- **OV**: area {ov_area:,.0f} m² • perimeter {ov_perim:,.0f} m\n"
-            f"- **GRB**: area {grb_area:,.0f} m² • perimeter {grb_perim:,.0f} m"
-        )
-        st.success("Zones computed. They’re drawn on the main map above.")
+            # Fit bounds to the widest available layer
+            for _g in [grb_geom, ov_geom, cv_geom, fg_geom]:
+                if _g:
+                    minx, miny, maxx, maxy = _g.bounds
+                    st.session_state.zones_bounds = (minx, miny, maxx, maxy)
+                    break
 
-        st.rerun()
+            # Metrics (only for layers that exist)
+            lines = []
+            if fg_geom:
+                fg_area, fg_perim = area_perimeter_m(fg_geom);   lines.append(f"- **FG**: area {fg_area:,.0f} m² • perimeter {fg_perim:,.0f} m")
+            if cv_geom:
+                cv_area, cv_perim = area_perimeter_m(cv_geom);   lines.append(f"- **CV**: area {cv_area:,.0f} m² • perimeter {cv_perim:,.0f} m")
+            if ov_geom:
+                ov_area, ov_perim = area_perimeter_m(ov_geom);   lines.append(f"- **OV**: area {ov_area:,.0f} m² • perimeter {ov_perim:,.0f} m")
+            if grb_geom:
+                grb_area, grb_perim = area_perimeter_m(grb_geom); lines.append(f"- **GRB**: area {grb_area:,.0f} m² • perimeter {grb_perim:,.0f} m")
 
+            if lines:
+                st.subheader("Metrics (projected in EPSG:28992)")
+                st.write("\n".join(lines))
+
+            # Export params (heights & margins still apply regardless of which base was drawn)
+            st.session_state.export_params = {
+                "h_fg_m": calculated_h_fg_m,
+                "h_cv_m": h_cv_apex_m,
+                "v0_ms": v0_ms,
+                "t_react_s": t_react_s,
+                "theta_deg": theta_deg,
+                "s_gps_m": s_gps_m,
+                "s_pos_m": s_pos_m,
+                "s_map_m": s_map_m,
+                "cv_m": round(cv_m, 2),
+                "cd_m": cd_m,
+                "grb_method": grb_method,
+                "grb_margin_m": round(grb_margin, 2),
+                "crs_buffering": "EPSG:28992 (RD New)",
+                "altitude_mode": "relativeToGround",
+                "base_layer": base_layer,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+
+            st.success("Zones computed. They’re drawn on the main map above.")
+            st.rerun()
 
     except Exception as e:
         st.error(f"Failed to compute zones: {e}")
-        st.session_state.zones = None # Clear on failure
+        st.session_state.zones = None
         st.session_state.export_params = None
 
-elif compute_button_clicked and not st.session_state.fg_geojson:
-    st.warning("Please save your FG polygon before computing zones.")
-# if st.session_state.zones:
-#     st.divider()
-#     st.subheader("Export Zones")
-
-#     # Generate the KMZ data on-the-fly for the download button
-#     kmz_bytes = write_kmz(st.session_state.zones, st.session_state.export_params)
-    
-#     st.download_button(
-#         label=f"Download KMZ (FG {calculated_h_fg_m:.0f} m, CV {h_cv_apex_m:.0f} m)",
-#         data=kmz_bytes,
-#         file_name=f"DOZE_zones_{datetime.now().strftime('%Y%m%d_%H%M')}.kmz",
-#         mime="application/vnd.google-earth.kmz",
-#     )
-
+elif compute_button_clicked and not st.session_state.input_geojson:
+    st.warning("Please save your polygon before computing zones.")
 # --------------- FG readout ---------------
-st.subheader("Current FG")
-if st.session_state.fg_geojson:
+st.subheader("Current input polygon")
+if st.session_state.input_geojson:
+    st.write(f"Layer: **{st.session_state.input_layer}**")
     st.code(
         json.dumps(
             {
-                "type": st.session_state.fg_geojson["geometry"]["type"],
-                "coordinates": st.session_state.fg_geojson["geometry"]["coordinates"][:1],
+                "type": st.session_state.input_geojson["geometry"]["type"],
+                "coordinates": st.session_state.input_geojson["geometry"]["coordinates"][:1],
             },
             indent=2,
         ),
         language="json",
     )
 else:
-    st.write("No FG saved yet.")
-
+    st.write("No input polygon saved yet.")
+    
+    
 st.caption("© DOZE — Drone Operation Zone Editor")
