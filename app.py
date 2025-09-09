@@ -24,7 +24,7 @@ import simplekml
 st.set_page_config(page_title="DOZE — Zones Preview", layout="wide")
 
 st.title("DOZE — Draw Flight Geography (FG)")
-st.caption("Based on https://www.lba.de/SharedDocs/Downloads/DE/B/B5_UAS/Leitfaden_FG_CV_GRB_eng.pdf which are in turn based on Regulation (EU) 2019/947.")
+st.caption("Drone Operation Zone Editor - Based on https://www.lba.de/SharedDocs/Downloads/DE/B/B5_UAS/Leitfaden_FG_CV_GRB_eng.pdf which are in turn based on Regulation (EU) 2019/947.")
 st.caption("This application DOES NOT take into account locations where you are and are not allowed to fly.")
 
 
@@ -34,6 +34,41 @@ MAX_HEIGHT_AGL_M = 120.0
 FG_TOP_CAP_M = 120.0  # FG cannot exceed this
 CV_TOP_CAP_M = 150.0  # CV apex cannot exceed this (FG + buffer)
 GRB_PRISM_HEIGHT_M = 10.0  
+
+DRONE_PROFILES = {
+    "DJI Matrice 30": {
+        "v0_ms": 23.0,       # max groundspeed
+        "t_react_s": 1.0,    # reaction time
+        "theta_deg": 35.0,   # max pitch
+        "s_gps_m": 3.0,      # GPS inaccuracy
+        "s_pos_m": 0.3,      # position hold error
+        "s_map_m": 1.0,      # map error
+        "cd_m": 0.60,        # characteristic dimension (tip-to-tip)
+        "h_baro_mode": "Barometric (1 m)",
+    },
+    # Example 2nd drone (adjust to your second platform’s real values)
+    "DJI Mavic 3": {
+        "v0_ms": 21.0,
+        "t_react_s": 1.0,
+        "theta_deg": 35.0,
+        "s_gps_m": 3.0,
+        "s_pos_m": 0.3,
+        "s_map_m": 1.0,
+        "cd_m": 0.38,
+        "h_baro_mode": "Barometric (1 m)",
+    },
+}
+
+# Initialize session keys once
+def _ensure_param(key, default):
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+def _apply_profile(profile_name: str):
+    prof = DRONE_PROFILES[profile_name]
+    for k, v in prof.items():
+        st.session_state[k] = v
+
 
 def cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m) -> float:
     theta_rad = math.radians(max(1e-6, theta_deg))
@@ -119,35 +154,108 @@ def area_perimeter_m(geom_wgs) -> Tuple[float, float]:
     return float(rd.area), float(rd.length)
 
 # ----------------- Sidebar controls -----------------
-st.sidebar.header("Map Settings")
-default_center = [52.1, 5.3]
-start_zoom = st.sidebar.slider("Initial zoom", 5, 14, 8)
-tile_choice = st.sidebar.selectbox(
-    "Base map",
-    ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter", "Stamen Terrain", "Stamen Toner"],
-    index=0,
-)
 
-st.sidebar.header("CV Calculator (Multirotor, defaults = DJI Matrice M30)")
-v0_ms = st.sidebar.number_input("Max groundspeed V₀ (m/s)", 0.0, 40.0, 23.0, 0.5)
-t_react_s = st.sidebar.number_input("Reaction time t (s)", 0.0, 5.0, 1.0, 0.1)
-theta_deg = st.sidebar.number_input("Max pitch θ (deg)", 1.0, 45.0, 35.0, 1.0)
-s_gps_m = st.sidebar.number_input("GPS inaccuracy S_GPS (m)", 0.0, 10.0, 3.0, 0.5)
-s_pos_m = st.sidebar.number_input("Position hold error S_pos (m)", 0.0, 10.0, 0.3, 0.5)
-s_map_m = st.sidebar.number_input("Map error S_K (m)", 0.0, 10.0, 1.0, 0.5)
-cv_m = cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m)
-st.sidebar.metric("Lateral CV margin (m)", f"{cv_m:.1f}")
-
-
-st.sidebar.divider()
-st.sidebar.header("Vertical Zone Calculation")
+st.sidebar.header("Flight Height")
 planned_fg_input_m = st.sidebar.number_input("Planned maximum flight height (m)", 0.0, 120.0, 50.0, 1.0,
     help="Your planned maximum flight height (up to 120 m). It will be lowered automatically if FG + buffer would exceed the 150 m CV apex."
 )
-h_baro_mode = st.sidebar.selectbox("Altitude measurement", ["Barometric (1 m)", "GPS-based (4 m)"], index=0)
+st.sidebar.divider()
+
+st.sidebar.header("Contingency Volume Calculator")
+st.sidebar.caption("(Multirotor only, defaults = DJI Matrice 30)")
+
+# --- Drone profile selector ---
+# First-time defaults
+default_profile_name = "DJI Matrice 30"
+_ensure_param("drone_profile", default_profile_name)
+_ensure_param("last_drone_profile", st.session_state["drone_profile"])
+
+# Show selector
+profile_choice = st.sidebar.selectbox(
+    "Drone type",
+    options=list(DRONE_PROFILES.keys()),
+    index=list(DRONE_PROFILES.keys()).index(st.session_state["drone_profile"]),
+    help="Choose a drone to prefill speed, reaction time, pitch, sensor errors, and CD."
+)
+
+# Apply profile if changed OR if first run with no params set
+if (profile_choice != st.session_state["last_drone_profile"]) or any(
+    k not in st.session_state for k in
+    ["v0_ms","t_react_s","theta_deg","s_gps_m","s_pos_m","s_map_m","cd_m","h_baro_mode"]
+):
+    _apply_profile(profile_choice)
+    st.session_state["drone_profile"] = profile_choice
+    st.session_state["last_drone_profile"] = profile_choice
+
+# Convenience handles
+opt_alt_modes = ["Barometric (1 m)", "GPS-based (4 m)"]
+
+# --- Inputs (prefilled from profile, still editable) ---
+v0_ms = st.sidebar.number_input(
+    "Max groundspeed V₀ (m/s)", 0.0, 40.0,
+    value=float(st.session_state["v0_ms"]), step=0.5, key="v0_ms"
+)
+t_react_s = st.sidebar.number_input(
+    "Reaction time t (s)", 0.0, 5.0,
+    value=float(st.session_state["t_react_s"]), step=0.1, key="t_react_s"
+)
+theta_deg = st.sidebar.number_input(
+    "Max pitch θ (deg)", 1.0, 45.0,
+    value=float(st.session_state["theta_deg"]), step=1.0, key="theta_deg"
+)
+s_gps_m = st.sidebar.number_input(
+    "GPS inaccuracy S_GPS (m)", 0.0, 10.0,
+    value=float(st.session_state["s_gps_m"]), step=0.5, key="s_gps_m"
+)
+s_pos_m = st.sidebar.number_input(
+    "Position hold error S_pos (m)", 0.0, 10.0,
+    value=float(st.session_state["s_pos_m"]), step=0.1, key="s_pos_m"
+)
+s_map_m = st.sidebar.number_input(
+    "Map error S_K (m)", 0.0, 10.0,
+    value=float(st.session_state["s_map_m"]), step=0.5, key="s_map_m"
+)
+
+cv_m = cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m)
+
+# Altitude measurement mode from profile
+_ensure_param("h_baro_mode", DRONE_PROFILES[st.session_state["drone_profile"]]["h_baro_mode"])
+h_baro_mode = st.sidebar.selectbox(
+    "Altitude measurement",
+    opt_alt_modes,
+    index=opt_alt_modes.index(st.session_state["h_baro_mode"]),
+    key="h_baro_mode"
+)
 h_baro_m = 1.0 if "Barometric" in h_baro_mode else 4.0
 
-# --- Vertical buffer components ---
+cd_m = st.sidebar.number_input(
+    "Characteristic dimension CD (m)", 0.0, 10.0,
+    value=float(st.session_state["cd_m"]), step=0.1, key="cd_m"
+)
+st.sidebar.caption("CD is the drone’s largest physical span, e.g., max diagonal tip-to-tip of the propellers.")
+
+grb_method = st.sidebar.selectbox("Method", ["Simplified (1:1)", "Ballistic"], index=1)
+
+
+# st.sidebar.header("Contingency Volume Calculator")
+# st.sidebar.caption("(Multirotor only, defaults = DJI Matrice M30)")
+# v0_ms = st.sidebar.number_input("Max groundspeed V₀ (m/s)", 0.0, 40.0, 23.0, 0.5)
+# t_react_s = st.sidebar.number_input("Reaction time t (s)", 0.0, 5.0, 1.0, 0.1)
+# theta_deg = st.sidebar.number_input("Max pitch θ (deg)", 1.0, 45.0, 35.0, 1.0)
+# s_gps_m = st.sidebar.number_input("GPS inaccuracy S_GPS (m)", 0.0, 10.0, 3.0, 0.5)
+# s_pos_m = st.sidebar.number_input("Position hold error S_pos (m)", 0.0, 10.0, 0.3, 0.5)
+# s_map_m = st.sidebar.number_input("Map error S_K (m)", 0.0, 10.0, 1.0, 0.5)
+# cv_m = cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m)
+
+# h_baro_mode = st.sidebar.selectbox("Altitude measurement", ["Barometric (1 m)", "GPS-based (4 m)"], index=0)
+# h_baro_m = 1.0 if "Barometric" in h_baro_mode else 4.0
+
+
+# cd_m = st.sidebar.number_input("Characteristic dimension CD (m) [needs to be checked with m30]", 0.0, 10.0, 0.6, 0.1)
+# st.sidebar.caption("CD is  the drone’s largest physical span, usually the maximum diagonal tip-to-tip of the propellers.")
+# grb_method = st.sidebar.selectbox("Method", ["Simplified (1:1)", "Ballistic"], index=1)
+
+
 h_rz = v0_ms * 0.7 * max(0.0, t_react_s)
 h_cm = 0.5 * ((v0_ms**2) / (2.0 * G))  # keep consistent with the rest of your file
 vertical_buffer_m = h_baro_m + h_rz + h_cm
@@ -158,13 +266,34 @@ fg_user_capped   = min(FG_TOP_CAP_M, planned_fg_input_m)         # never above 1
 calculated_h_fg_m = max(0.0, min(fg_user_capped, allowed_fg_by_cv))
 h_cv_apex_m = calculated_h_fg_m + vertical_buffer_m              # ≤ 150 by construction
 
+
+if grb_method.startswith("Simplified"):
+    grb_margin = grb_simplified(h_cv_apex_m, cd_m)
+else:
+    grb_margin = grb_ballistic(v0_ms, h_cv_apex_m, cd_m)
+
+
+
+st.sidebar.divider()
+
+
+st.sidebar.header("Calculated values")
+
+
+
+# --- Vertical buffer components ---
+
 # Readout
+st.sidebar.metric("Lateral CV margin", f"{cv_m:.1f} m")
+
+
 st.sidebar.metric("Planned FG (user input)", f"{planned_fg_input_m:.1f} m")
-st.sidebar.metric("Required Vertical Buffer", f"{vertical_buffer_m:.1f} m")
 st.sidebar.metric("Resulting FG apex H_FG", f"{calculated_h_fg_m:.1f} m")
+st.sidebar.metric("Required Vertical Buffer", f"{vertical_buffer_m:.1f} m")
 st.sidebar.metric("Resulting CV apex H_CV", f"{h_cv_apex_m:.1f} m")
 
-# Warnings / notes
+
+
 if planned_fg_input_m > allowed_fg_by_cv + 1e-6:
     st.sidebar.warning(
         f"Planned FG reduced from {planned_fg_input_m:.1f} m to {calculated_h_fg_m:.1f} m "
@@ -173,16 +302,21 @@ if planned_fg_input_m > allowed_fg_by_cv + 1e-6:
 if calculated_h_fg_m <= 0:
     st.sidebar.error("Flight not possible: buffer alone exceeds the CV ceiling of 150 m. Reduce speed or reaction time.")
 
-st.sidebar.header("GRB (Multirotor)")
-cd_m = st.sidebar.number_input("Characteristic dimension CD (m) [needs to be checked with m30]", 0.0, 10.0, 0.6, 0.1)
-grb_method = st.sidebar.selectbox("Method", ["Simplified (1:1)", "Ballistic"], index=1)
-
-if grb_method.startswith("Simplified"):
-    grb_margin = grb_simplified(h_cv_apex_m, cd_m)
-else:
-    grb_margin = grb_ballistic(v0_ms, h_cv_apex_m, cd_m)
-
 st.sidebar.metric("GRB margin (m)", f"{grb_margin:.1f}")
+
+
+st.sidebar.divider()
+
+st.sidebar.header("Map Settings")
+default_center = [52.1, 5.3]
+start_zoom = st.sidebar.slider("Initial zoom", 5, 14, 8)
+tile_choice = st.sidebar.selectbox(
+    "Base map",
+    ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"],
+    index=0,
+)
+
+
 
 # ---- KML/KMZ helpers ----
 
@@ -322,7 +456,9 @@ st.markdown("**Instructions**")
 st.markdown(
     "1) Draw your FG polygon with the tool.\n"
     "2) Click **Save FG**.\n"
-    "3) Click **Compute Zones** to preview CV, OV, GRB."
+    "3) Click **Compute Zones** to preview CV, OV, GRB..\n"
+    "4) Click **Download KMZ**.\n"
+    "5) Open .kmz in Google Earth"
 )
 
 # Define colors for zones
@@ -394,9 +530,10 @@ def get_current_polygon_feature(md: dict) -> Optional[dict]:
     polys = [g for g in drawings if g and g.get("geometry", {}).get("type", "").lower().endswith("polygon")]
     return polys[-1] if polys else None
 
-col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+
 with col1:
-    if st.button("Save FG"):
+    if st.button("Save FG", use_container_width=True):
         feature = get_current_polygon_feature(map_data)
         if feature is None:
             st.warning("Please draw a polygon first (use the polygon tool).")
@@ -407,20 +544,42 @@ with col1:
                 "geometry": feature["geometry"],
             }
             st.success("FG saved to session.")
-            # Important: Rerun to update the map with the saved FG
             st.rerun()
 
 with col2:
-    if st.button("Clear FG"):
+    if st.button("Clear FG", use_container_width=True):
         st.session_state.fg_geojson = None
-        st.session_state.zones = None # Also clear zones when FG is cleared
+        st.session_state.zones = None
         st.session_state.zones_bounds = None
+        st.session_state.export_params = None
         st.rerun()
 
+with col3:
+    compute_button_clicked = st.button("Compute Zones", use_container_width=True)
+
+with col4:
+    # Always show a Download KMZ control.
+    if st.session_state.get("zones") and st.session_state.get("export_params"):
+        # Zones are ready → show real download button
+        kmz_bytes = write_kmz(st.session_state.zones, st.session_state.export_params)
+        st.download_button(
+            label=f"Download KMZ (FG {calculated_h_fg_m:.0f} m, CV {h_cv_apex_m:.0f} m)",
+            data=kmz_bytes,
+            file_name=f"DOZE_zones_{datetime.now().strftime('%Y%m%d_%H%M')}.kmz",
+            mime="application/vnd.google-earth.kmz",
+            use_container_width=True,
+            key="download_kmz_ready",
+        )
+    else:
+        # Not ready → clickable button that instructs the user
+        if st.button("Download KMZ", use_container_width=True, key="download_kmz_stub"):
+            if not st.session_state.get("fg_geojson"):
+                st.warning("Please draw and **Save FG** first.")
+            else:
+                st.warning("Please click **Compute Zones** before downloading the KMZ.")    
+    
+
 # --------------- Compute & render zones ---------------
-# Use a form to group the button and prevent immediate reruns on input changes
-with st.form("zone_computation_form"):
-    compute_button_clicked = st.form_submit_button("Compute Zones")
 
 if compute_button_clicked and st.session_state.fg_geojson:
     try:
@@ -488,22 +647,22 @@ if compute_button_clicked and st.session_state.fg_geojson:
 
 elif compute_button_clicked and not st.session_state.fg_geojson:
     st.warning("Please save your FG polygon before computing zones.")
-if st.session_state.zones:
-    st.divider()
-    st.subheader("Export Zones")
+# if st.session_state.zones:
+#     st.divider()
+#     st.subheader("Export Zones")
 
-    # Generate the KMZ data on-the-fly for the download button
-    kmz_bytes = write_kmz(st.session_state.zones, st.session_state.export_params)
+#     # Generate the KMZ data on-the-fly for the download button
+#     kmz_bytes = write_kmz(st.session_state.zones, st.session_state.export_params)
     
-    st.download_button(
-        label=f"Download KMZ (FG {calculated_h_fg_m:.0f} m, CV {h_cv_apex_m:.0f} m)",
-        data=kmz_bytes,
-        file_name=f"DOZE_zones_{datetime.now().strftime('%Y%m%d_%H%M')}.kmz",
-        mime="application/vnd.google-earth.kmz",
-    )
+#     st.download_button(
+#         label=f"Download KMZ (FG {calculated_h_fg_m:.0f} m, CV {h_cv_apex_m:.0f} m)",
+#         data=kmz_bytes,
+#         file_name=f"DOZE_zones_{datetime.now().strftime('%Y%m%d_%H%M')}.kmz",
+#         mime="application/vnd.google-earth.kmz",
+#     )
 
 # --------------- FG readout ---------------
-st.subheader("Current FG (captured)")
+st.subheader("Current FG")
 if st.session_state.fg_geojson:
     st.code(
         json.dumps(
@@ -518,4 +677,4 @@ if st.session_state.fg_geojson:
 else:
     st.write("No FG saved yet.")
 
-st.caption("© DOZE — Drone Operation Zone Editor (buffering preview)")
+st.caption("© DOZE — Drone Operation Zone Editor")
