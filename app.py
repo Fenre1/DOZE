@@ -17,7 +17,7 @@ from pyproj import Transformer
 
 import io
 import zipfile 
-import tempfile
+
 from datetime import datetime
 import simplekml
 
@@ -70,12 +70,11 @@ def _apply_profile(profile_name: str):
         st.session_state[k] = v
 
 
+
 def cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m) -> float:
     theta_rad = math.radians(max(1e-6, theta_deg))
     s_rz = v0_ms * max(0.0, t_react_s)
-    print(s_rz)
     s_cm = 0.5*((v0_ms**2) / (G * math.tan(theta_rad)))
-    print(s_cm)
     return s_gps_m + s_pos_m + s_map_m + s_rz + s_cm
 
 def cv_vertical_multirotor(h_fg_m, v0_ms, t_react_s, h_baro_m) -> float:
@@ -98,6 +97,20 @@ WGS84 = "EPSG:4326"
 RDNEW = "EPSG:28992"
 to_rd = Transformer.from_crs(WGS84, RDNEW, always_xy=True)
 to_wgs = Transformer.from_crs(RDNEW, WGS84, always_xy=True)
+
+def _utm_epsg_from_lonlat(lon: float, lat: float) -> str:
+    """Return an EPSG code for the UTM zone covering (lon, lat)."""
+    zone = int((lon + 180) // 6) + 1  # 1..60
+    return f"EPSG:{32600 + zone}" if lat >= 0 else f"EPSG:{32700 + zone}"
+
+def _get_local_transformers(geom_wgs) -> tuple[str, Transformer, Transformer]:
+    """Pick a suitable UTM CRS from the geometry centroid and return (epsg, to_local, to_wgs)."""
+    c = geom_wgs.centroid
+    lon, lat = float(c.x), float(c.y)
+    epsg = _utm_epsg_from_lonlat(lon, lat)
+    to_local = Transformer.from_crs(WGS84, epsg, always_xy=True)
+    to_wgs   = Transformer.from_crs(epsg, WGS84, always_xy=True)
+    return epsg, to_local, to_wgs
 
 def wgs_to_rd_coords(coords):
     return [to_rd.transform(x, y) for x, y in coords]
@@ -141,34 +154,76 @@ def unproject_geom(geom_rd):
         raise ValueError("Unexpected geometry type")
 
 def buffer_m(geom_wgs, radius_m: float, cap_style=1, join_style=1):
-    """Buffer in metres using RD New, then return WGS84."""
+    """Buffer in metres using a local UTM, then return WGS84 geometry."""
     if radius_m <= 0:
         return geom_wgs
-    rd = project_geom(geom_wgs)
-    buf = rd.buffer(radius_m, cap_style=cap_style, join_style=join_style)
-    return unproject_geom(buf)
+    epsg, to_local, to_wgs = _get_local_transformers(geom_wgs)
 
-def offset_m(geom_wgs, offset_meters: float, cap_style=1, join_style=1):
-    """Positive = outward, negative = inward, using RD New. Returns None if empty."""
-    rd = project_geom(geom_wgs)
-    buf = rd.buffer(offset_meters, cap_style=cap_style, join_style=join_style)
+    def project_poly(poly: Polygon) -> Polygon:
+        ext = [to_local.transform(x, y) for x, y in poly.exterior.coords]
+        holes = [[to_local.transform(x, y) for x, y in r.coords] for r in poly.interiors]
+        return Polygon(ext, holes)
+
+    def unproject_poly(poly: Polygon) -> Polygon:
+        ext = [to_wgs.transform(x, y) for x, y in poly.exterior.coords]
+        holes = [[to_wgs.transform(x, y) for x, y in r.coords] for r in poly.interiors]
+        return Polygon(ext, holes)
+
+    if isinstance(geom_wgs, Polygon):
+        local = project_poly(geom_wgs)
+    elif isinstance(geom_wgs, MultiPolygon):
+        local = MultiPolygon([project_poly(p) for p in geom_wgs.geoms])
+    else:
+        raise ValueError("Geometry must be Polygon or MultiPolygon")
+
+    buf = local.buffer(radius_m, cap_style=cap_style, join_style=join_style)
     if buf.is_empty:
         return None
-    # Keep only polygonal surfaces if a GeometryCollection occurs
+
     if isinstance(buf, GeometryCollection):
-        polys = [g for g in buf.geoms if isinstance(g, (Polygon, MultiPolygon))]
-        if not polys:
+        parts = [g for g in buf.geoms if isinstance(g, (Polygon, MultiPolygon))]
+        if not parts:
             return None
-        buf = unary_union(polys)
-    return unproject_geom(buf)
+        buf = unary_union(parts)
+
+    # remember CRS used
+    st.session_state["last_metric_crs"] = epsg
+
+    if isinstance(buf, Polygon):
+        return unproject_poly(buf)
+    else:
+        return MultiPolygon([unproject_poly(p) for p in buf.geoms])
+
+def offset_m(geom_wgs, offset_meters: float, cap_style=1, join_style=1):
+    """Positive = outward, negative = inward (same local UTM approach)."""
+    # Reuse buffer_m semantics; shapely negative buffer = inward offset
+    return buffer_m(geom_wgs, offset_meters, cap_style=cap_style, join_style=join_style)
 
 def area_perimeter_m(geom_wgs) -> Tuple[float, float]:
-    """Return (area_m2, perimeter_m) using RD New for metric accuracy."""
-    rd = project_geom(geom_wgs)
-    return float(rd.area), float(rd.length)
+    """Return (area_m2, perimeter_m) using a local UTM for metric accuracy."""
+    epsg, to_local, _ = _get_local_transformers(geom_wgs)
+
+    def project_poly(poly: Polygon) -> Polygon:
+        ext = [to_local.transform(x, y) for x, y in poly.exterior.coords]
+        holes = [[to_local.transform(x, y) for x, y in r.coords] for r in poly.interiors]
+        return Polygon(ext, holes)
+
+    if isinstance(geom_wgs, Polygon):
+        local = project_poly(geom_wgs)
+    elif isinstance(geom_wgs, MultiPolygon):
+        local = MultiPolygon([project_poly(p) for p in geom_wgs.geoms])
+    else:
+        raise ValueError("Geometry must be Polygon or MultiPolygon")
+
+    # remember CRS used
+    st.session_state["last_metric_crs"] = epsg
+
+    return float(local.area), float(local.length)
 
 # ----------------- Sidebar controls -----------------
 # What does the drawn polygon represent?
+
+
 st.sidebar.header("Drawing mode")
 st.session_state["input_layer"] = st.sidebar.radio(
     "The polygon I draw represents:",
@@ -331,6 +386,10 @@ st.sidebar.metric("GRB margin (m)", f"{grb_margin:.1f}")
 st.sidebar.divider()
 
 st.sidebar.header("Map Settings")
+
+metric_crs = st.session_state.get("last_metric_crs", "local UTM")
+st.sidebar.text(f"Metrics (projected in {metric_crs})")
+
 default_center = [52.1, 5.3]
 start_zoom = st.sidebar.slider("Initial zoom", 5, 14, 8)
 tile_choice = st.sidebar.selectbox(
@@ -697,7 +756,7 @@ if compute_button_clicked and st.session_state.input_geojson:
                 "cd_m": cd_m,
                 "grb_method": grb_method,
                 "grb_margin_m": round(grb_margin, 2),
-                "crs_buffering": "EPSG:28992 (RD New)",
+                "crs_buffering": st.session_state.get("last_metric_crs", "local UTM"),
                 "altitude_mode": "relativeToGround",
                 "base_layer": base_layer,
                 "timestamp": datetime.utcnow().isoformat() + "Z",
