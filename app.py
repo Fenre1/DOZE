@@ -94,9 +94,9 @@ def grb_ballistic(v0_ms: float, h_cv_m: float, cd_m: float) -> float:
 
 # ---- Projection helpers (WGS84 <-> RD New) ----
 WGS84 = "EPSG:4326"
-RDNEW = "EPSG:28992"
-to_rd = Transformer.from_crs(WGS84, RDNEW, always_xy=True)
-to_wgs = Transformer.from_crs(RDNEW, WGS84, always_xy=True)
+# RDNEW = "EPSG:28992"
+# to_rd = Transformer.from_crs(WGS84, RDNEW, always_xy=True)
+# to_wgs = Transformer.from_crs(RDNEW, WGS84, always_xy=True)
 
 def _utm_epsg_from_lonlat(lon: float, lat: float) -> str:
     """Return an EPSG code for the UTM zone covering (lon, lat)."""
@@ -112,11 +112,11 @@ def _get_local_transformers(geom_wgs) -> tuple[str, Transformer, Transformer]:
     to_wgs   = Transformer.from_crs(epsg, WGS84, always_xy=True)
     return epsg, to_local, to_wgs
 
-def wgs_to_rd_coords(coords):
-    return [to_rd.transform(x, y) for x, y in coords]
+# def wgs_to_rd_coords(coords):
+#     return [to_rd.transform(x, y) for x, y in coords]
 
-def rd_to_wgs_coords(coords):
-    return [to_wgs.transform(x, y) for x, y in coords]
+# def rd_to_wgs_coords(coords):
+#     return [to_wgs.transform(x, y) for x, y in coords]
 
 def geojson_to_shapely_wgs(feature_geojson) -> MultiPolygon | Polygon:
     """Feature -> shapely geometry in WGS84."""
@@ -127,31 +127,31 @@ def geojson_to_shapely_wgs(feature_geojson) -> MultiPolygon | Polygon:
 def shapely_wgs_to_geojson(geom) -> dict:
     return {"type": "Feature", "properties": {}, "geometry": mapping(geom)}
 
-def project_geom(geom_wgs):
-    """Project a Polygon/MultiPolygon from WGS84 to RD New."""
-    def project_poly(poly: Polygon) -> Polygon:
-        exterior = wgs_to_rd_coords(list(poly.exterior.coords))
-        interiors = [wgs_to_rd_coords(list(r.coords)) for r in poly.interiors]
-        return Polygon(exterior, interiors)
-    if isinstance(geom_wgs, Polygon):
-        return project_poly(geom_wgs)
-    elif isinstance(geom_wgs, MultiPolygon):
-        return MultiPolygon([project_poly(p) for p in geom_wgs.geoms])
-    else:
-        raise ValueError("FG must be Polygon or MultiPolygon")
+# def project_geom(geom_wgs):
+#     """Project a Polygon/MultiPolygon from WGS84 to RD New."""
+#     def project_poly(poly: Polygon) -> Polygon:
+#         exterior = wgs_to_rd_coords(list(poly.exterior.coords))
+#         interiors = [wgs_to_rd_coords(list(r.coords)) for r in poly.interiors]
+#         return Polygon(exterior, interiors)
+#     if isinstance(geom_wgs, Polygon):
+#         return project_poly(geom_wgs)
+#     elif isinstance(geom_wgs, MultiPolygon):
+#         return MultiPolygon([project_poly(p) for p in geom_wgs.geoms])
+#     else:
+#         raise ValueError("FG must be Polygon or MultiPolygon")
 
-def unproject_geom(geom_rd):
-    """Back to WGS84."""
-    def unproject_poly(poly: Polygon) -> Polygon:
-        exterior = rd_to_wgs_coords(list(poly.exterior.coords))
-        interiors = [rd_to_wgs_coords(list(r.coords)) for r in poly.interiors]
-        return Polygon(exterior, interiors)
-    if isinstance(geom_rd, Polygon):
-        return unproject_poly(geom_rd)
-    elif isinstance(geom_rd, MultiPolygon):
-        return MultiPolygon([unproject_poly(p) for p in geom_rd.geoms])
-    else:
-        raise ValueError("Unexpected geometry type")
+# def unproject_geom(geom_rd):
+#     """Back to WGS84."""
+#     def unproject_poly(poly: Polygon) -> Polygon:
+#         exterior = rd_to_wgs_coords(list(poly.exterior.coords))
+#         interiors = [rd_to_wgs_coords(list(r.coords)) for r in poly.interiors]
+#         return Polygon(exterior, interiors)
+#     if isinstance(geom_rd, Polygon):
+#         return unproject_poly(geom_rd)
+#     elif isinstance(geom_rd, MultiPolygon):
+#         return MultiPolygon([unproject_poly(p) for p in geom_rd.geoms])
+#     else:
+#         raise ValueError("Unexpected geometry type")
 
 def buffer_m(geom_wgs, radius_m: float, cap_style=1, join_style=1):
     """Buffer in metres using a local UTM, then return WGS84 geometry."""
@@ -271,44 +271,45 @@ opt_alt_modes = ["Barometric (1 m)", "GPS-based (4 m)"]
 # --- Inputs (prefilled from profile, still editable) ---
 v0_ms = st.sidebar.number_input(
     "Max groundspeed V₀ (m/s)", 0.0, 40.0,
-    value=float(st.session_state["v0_ms"]), step=0.5, key="v0_ms"
+    step=0.5, key="v0_ms"        # removed value=
 )
 t_react_s = st.sidebar.number_input(
     "Reaction time t (s)", 0.0, 5.0,
-    value=float(st.session_state["t_react_s"]), step=0.1, key="t_react_s"
+    step=0.1, key="t_react_s"    # removed value=
 )
 theta_deg = st.sidebar.number_input(
     "Max pitch θ (deg)", 1.0, 45.0,
-    value=float(st.session_state["theta_deg"]), step=1.0, key="theta_deg"
+    step=1.0, key="theta_deg"    # removed value=
 )
 s_gps_m = st.sidebar.number_input(
     "GPS inaccuracy S_GPS (m)", 0.0, 10.0,
-    value=float(st.session_state["s_gps_m"]), step=0.5, key="s_gps_m"
+    step=0.5, key="s_gps_m"      # removed value=
 )
 s_pos_m = st.sidebar.number_input(
     "Position hold error S_pos (m)", 0.0, 10.0,
-    value=float(st.session_state["s_pos_m"]), step=0.1, key="s_pos_m"
+    step=0.1, key="s_pos_m"      # removed value=
 )
 s_map_m = st.sidebar.number_input(
     "Map error S_K (m)", 0.0, 10.0,
-    value=float(st.session_state["s_map_m"]), step=0.5, key="s_map_m"
+    step=0.5, key="s_map_m"      # removed value=
 )
 
 cv_m = cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m)
 
 # Altitude measurement mode from profile
+# ensure default (you already do this right before)
 _ensure_param("h_baro_mode", DRONE_PROFILES[st.session_state["drone_profile"]]["h_baro_mode"])
+
 h_baro_mode = st.sidebar.selectbox(
     "Altitude measurement",
     opt_alt_modes,
-    index=opt_alt_modes.index(st.session_state["h_baro_mode"]),
-    key="h_baro_mode"
+    key="h_baro_mode"   # removed index=
 )
 h_baro_m = 1.0 if "Barometric" in h_baro_mode else 4.0
 
 cd_m = st.sidebar.number_input(
     "Characteristic dimension CD (m)", 0.0, 10.0,
-    value=float(st.session_state["cd_m"]), step=0.1, key="cd_m"
+    step=0.1, key="cd_m"         # removed value=
 )
 st.sidebar.caption("CD is the drone’s largest physical span, e.g., max diagonal tip-to-tip of the propellers.")
 
@@ -640,18 +641,12 @@ with col1:
             st.success(f"{st.session_state.input_layer} saved to session.")
             st.rerun()
 
-with col2:
-    if st.button("Clear Input", use_container_width=True):
-        st.session_state.input_geojson = None
-        st.session_state.zones = None
-        st.session_state.zones_bounds = None
-        st.session_state.export_params = None
-        st.rerun()
 
-with col3:
+
+with col2:
     compute_button_clicked = st.button("Compute Zones", use_container_width=True)
 
-with col4:
+with col3:
     # Always show a Download KMZ control.
     if st.session_state.get("zones") and st.session_state.get("export_params"):
         kmz_bytes = write_kmz(st.session_state.zones, st.session_state.export_params)
@@ -670,7 +665,13 @@ with col4:
             else:
                 st.warning("Please click **Compute Zones** before downloading the KMZ.")
 
-    
+with col4:
+    if st.button("Clear Input", use_container_width=True):
+        st.session_state.input_geojson = None
+        st.session_state.zones = None
+        st.session_state.zones_bounds = None
+        st.session_state.export_params = None
+        st.rerun()    
 
 # --------------- Compute & render zones ---------------
 
