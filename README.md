@@ -1,6 +1,6 @@
 # DOZE — Drone Operation Zone Editor
 
-DOZE is a Streamlit app to sketch **Flight Geography (FG)** and automatically derive **Contingency Volume (CV)**, **Operational Volume (OV)** and **Ground Risk Buffer (GRB)**. These can then be exported to .kmz to use with Google Earth.
+DOZE is a Flask app to sketch **Flight Geography (FG)** and automatically derive **Contingency Volume (CV)**, **Operational Volume (OV)** and **Ground Risk Buffer (GRB)**. These can then be exported to .kmz to use with Google Earth.
 
 > This tool does **not** check airspace/NO-fly rules. It’s a planning helper based on https://www.lba.de/SharedDocs/Downloads/DE/B/B5_UAS/Leitfaden_FG_CV_GRB_eng.pdf which is in turn based on Regulation (EU) 2019/947
 
@@ -32,9 +32,9 @@ pip install -r requirements.txt
 
 To run:
 ```bash
-streamlit run app.py
+ptyhon app_flask.py
 ```
-The app opens in your browser (default: http://localhost:8501/
+The app opens in your browser (default: http://localhost:5000/
 
 
 ## Disclaimer

@@ -1,6 +1,4 @@
-streamlit
-folium
-streamlit-folium
+flask
 shapely
 pyproj
 simplekml

@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DOZE — Drone Operation Zone Editor</title>
+
+    <!-- Bootstrap 5.3 -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Leaflet & Leaflet.Draw -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+    <style>
+      body { background: #f8f9fa; }
+      .sidebar { width: 380px; } 
+	  #map { height: 650px; }      
+      .metric { font-variant-numeric: tabular-nums; }
+      code.small { font-size: .825rem; }
+    </style>
+  </head>
+  <body>
+    <nav class="navbar navbar-expand-lg bg-body border-bottom sticky-top">
+      <div class="container-fluid">
+        <span class="navbar-brand fw-semibold">DOZE — Drone Operation Zone Editor</span>
+        <span class="navbar-text">(Flask + Bootstrap 5.3)</span>
+      </div>
+    </nav>
+
+    <div class="container-fluid py-3">
+      <div class="row gx-2 gy-3">
+        <div class="col-12 col-lg-auto">
+          <div class="card shadow-sm sidebar">
+            <div class="card-body">
+              <h5 class="card-title">Drawing mode</h5>
+              <div class="btn-group" role="group">
+                <input type="radio" class="btn-check" name="inputLayer" id="layerFG" autocomplete="off" value="FG" checked>
+                <label class="btn btn-outline-primary" for="layerFG">FG</label>
+                <input type="radio" class="btn-check" name="inputLayer" id="layerCV" autocomplete="off" value="CV">
+                <label class="btn btn-outline-primary" for="layerCV">CV</label>
+                <input type="radio" class="btn-check" name="inputLayer" id="layerGRB" autocomplete="off" value="GRB">
+                <label class="btn btn-outline-primary" for="layerGRB">GRB</label>
+              </div>
+
+              <hr>
+              <h5>Flight Height</h5>
+              <div class="mb-3">
+                <label class="form-label">Planned maximum flight height (m)</label>
+                <input type="number" step="1" min="0" max="120" class="form-control" id="plannedFG" value="50">
+                <div class="form-text">Up to 120 m. Will be lowered if CV apex would exceed 150 m.</div>
+              </div>
+
+              <hr>
+              <h5>Contingency Volume Calculator <small class="text-muted">(Multirotor)</small></h5>
+              <div class="mb-2">
+                <label class="form-label">Drone type</label>
+                <select class="form-select" id="droneProfile">
+                  {% for name, vals in drone_profiles.items() %}
+                    <option value="{{name}}" {% if name==default_profile_name %}selected{% endif %}>{{name}}</option>
+                  {% endfor %}
+                </select>
+              </div>
+
+              <div class="row g-2">
+                <div class="col-6">
+                  <label class="form-label">V₀ (m/s)</label>
+                  <input type="number" step="0.5" min="0" max="40" class="form-control" id="v0" value="{{drone_profiles[default_profile_name]['v0_ms']}}">
+                </div>
+                <div class="col-6">
+                  <label class="form-label">Reaction t (s)</label>
+                  <input type="number" step="0.1" min="0" max="5" class="form-control" id="tReact" value="{{drone_profiles[default_profile_name]['t_react_s']}}">
+                </div>
+                <div class="col-6">
+                  <label class="form-label">Pitch θ (deg)</label>
+                  <input type="number" step="1" min="1" max="45" class="form-control" id="theta" value="{{drone_profiles[default_profile_name]['theta_deg']}}">
+                </div>
+                <div class="col-6">
+                  <label class="form-label">GPS inacc. (m)</label>
+                  <input type="number" step="0.5" min="0" max="10" class="form-control" id="sGps" value="{{drone_profiles[default_profile_name]['s_gps_m']}}">
+                </div>
+                <div class="col-6">
+                  <label class="form-label">Pos hold (m)</label>
+                  <input type="number" step="0.1" min="0" max="10" class="form-control" id="sPos" value="{{drone_profiles[default_profile_name]['s_pos_m']}}">
+                </div>
+                <div class="col-6">
+                  <label class="form-label">Map error (m)</label>
+                  <input type="number" step="0.5" min="0" max="10" class="form-control" id="sMap" value="{{drone_profiles[default_profile_name]['s_map_m']}}">
+                </div>
+                <div class="col-6">
+                  <label class="form-label">CD (m)</label>
+                  <input type="number" step="0.1" min="0" max="10" class="form-control" id="cd" value="{{drone_profiles[default_profile_name]['cd_m']}}">
+                </div>
+                <div class="col-6">
+                  <label class="form-label">Altitude measurement</label>
+                  <select class="form-select" id="hBaroMode">
+                    <option {% if 'Barometric' in drone_profiles[default_profile_name]['h_baro_mode'] %}selected{% endif %}>Barometric (1 m)</option>
+                    <option {% if 'GPS' in drone_profiles[default_profile_name]['h_baro_mode'] %}selected{% endif %}>GPS-based (4 m)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="mt-2">
+                <label class="form-label">GRB Method</label>
+                <select class="form-select" id="grbMethod">
+                  <option>Ballistic</option>
+                  <option>Simplified (1:1)</option>
+                </select>
+              </div>
+
+              <hr>
+              <h5>Actions</h5>
+              <div class="d-grid gap-2">
+                <button class="btn btn-success" id="btnSave">Save <span id="saveLabel">FG</span></button>
+                <button class="btn btn-primary" id="btnCompute">Compute Zones</button>
+                <button class="btn btn-info" id="btnDownload" disabled>Download KMZ</button>
+                <button class="btn btn-outline-danger" id="btnClear">Clear</button>
+              </div>
+
+              <hr>
+              <small class="text-muted">{{drivers_note}}</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-12 col-lg">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <div id="map" class="rounded"></div>
+              <div class="mt-3" id="metrics"></div>
+              <div class="mt-2" id="inputPreview" style="display:none"></div>
+              <div class="mt-3 text-muted small">© DOZE — Drone Operation Zone Editor</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const DRONE_PROFILES = {{ drone_profiles | tojson }};
+
+      const colors = {
+        FG:  { color: '#1565c0', fillOpacity: 0.15 },
+        CV:  { color: '#ff9800', fillOpacity: 0.15 },
+        OV:  { color: '#42a5f5', fillOpacity: 0.05 },
+        GRB: { color: '#e53935', fillOpacity: 0.12 },
+      };
+
+      const appState = {
+        inputLayer: 'FG',
+        inputGeoJSON: null,
+        zones: null,
+        exportParams: null,
+        layers: {},
+      };
+	  document.getElementById('btnCompute').disabled = true;
+      // --- Map setup ---
+      const defaultCenter = [52.1, 5.3];
+      const map = L.map('map', { zoomControl: true }).setView(defaultCenter, 8);
+
+      const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+
+      const positron = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; CARTO, OpenStreetMap'
+      });
+
+      const darkMatter = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; CARTO, OpenStreetMap'
+      });
+
+      const baseMaps = { 'OpenStreetMap': osm, 'CartoDB positron': positron, 'CartoDB dark_matter': darkMatter };
+      L.control.layers(baseMaps, null, { collapsed: true }).addTo(map);
+
+      const drawnItems = new L.FeatureGroup();
+      map.addLayer(drawnItems);
+
+      const drawControl = new L.Control.Draw({
+        position: 'topleft',
+        draw: {
+          polyline: false, rectangle: false, circle: false, marker: false, circlemarker: false,
+          polygon: { allowIntersection: false, showArea: true, shapeOptions: { color: '#2e7d32', weight: 3, fillOpacity: 0.2 } }
+        },
+        edit: { featureGroup: drawnItems }
+      });
+      map.addControl(drawControl);
+
+      map.on(L.Draw.Event.CREATED, function (e) {
+        drawnItems.addLayer(e.layer);
+      });
+      map.on(L.Draw.Event.EDITED, function (e) {});
+
+      function latestPolygonFeature() {
+        let last = null;
+        drawnItems.eachLayer(function(layer){
+          if (layer.toGeoJSON && layer.toGeoJSON().geometry && /Polygon$/i.test(layer.toGeoJSON().geometry.type)) {
+            last = layer;
+          }
+        });
+        return last ? last.toGeoJSON() : null;
+      }
+
+      function setSaveLabel() {
+        const v = document.querySelector('input[name="inputLayer"]:checked').value;
+        document.getElementById('saveLabel').textContent = v;
+      }
+
+      document.querySelectorAll('input[name="inputLayer"]').forEach(r => {
+        r.addEventListener('change', () => {
+          appState.inputLayer = document.querySelector('input[name="inputLayer"]:checked').value;
+          setSaveLabel();
+        });
+      });
+      setSaveLabel();
+
+      // Drone profile autofill
+      document.getElementById('droneProfile').addEventListener('change', (e) => {
+        const p = DRONE_PROFILES[e.target.value];
+        if (!p) return;
+        document.getElementById('v0').value = p.v0_ms;
+        document.getElementById('tReact').value = p.t_react_s;
+        document.getElementById('theta').value = p.theta_deg;
+        document.getElementById('sGps').value = p.s_gps_m;
+        document.getElementById('sPos').value = p.s_pos_m;
+        document.getElementById('sMap').value = p.s_map_m;
+        document.getElementById('cd').value = p.cd_m;
+        document.getElementById('hBaroMode').value = p.h_baro_mode;
+      });
+
+      // Buttons
+      document.getElementById('btnSave').addEventListener('click', () => {
+        const feat = latestPolygonFeature();
+        if (!feat) { alert('Please draw a polygon first.'); return; }
+        appState.inputGeoJSON = { type: 'Feature', properties: { name: appState.inputLayer, source: 'leaflet-draw' }, geometry: feat.geometry };
+        document.getElementById('inputPreview').style.display = 'block';
+        document.getElementById('inputPreview').innerHTML = `<h6>Current input polygon</h6><div>Layer: <strong>${appState.inputLayer}</strong></div><pre class="small bg-light p-2 border rounded"><code>${JSON.stringify({ type: appState.inputGeoJSON.geometry.type, coordinates: appState.inputGeoJSON.geometry.coordinates.slice(0,1) }, null, 2)}</code></pre>`;
+		document.getElementById('btnCompute').disabled = false;
+        //alert(appState.inputLayer + ' saved to session.');
+      });
+
+      function getFormValues() {
+        return {
+          input_layer: appState.inputLayer,
+          input_geojson: appState.inputGeoJSON,
+          planned_fg_input_m: parseFloat(document.getElementById('plannedFG').value || '50'),
+          v0_ms: parseFloat(document.getElementById('v0').value || '23'),
+          t_react_s: parseFloat(document.getElementById('tReact').value || '1'),
+          theta_deg: parseFloat(document.getElementById('theta').value || '35'),
+          s_gps_m: parseFloat(document.getElementById('sGps').value || '3'),
+          s_pos_m: parseFloat(document.getElementById('sPos').value || '0.3'),
+          s_map_m: parseFloat(document.getElementById('sMap').value || '1'),
+          cd_m: parseFloat(document.getElementById('cd').value || '0.6'),
+          h_baro_mode: document.getElementById('hBaroMode').value,
+          grb_method: document.getElementById('grbMethod').value,
+        };
+      }
+
+      function clearDerivedLayers() {
+        ['FG','CV','OV','GRB'].forEach(n => {
+          if (appState.layers[n]) { map.removeLayer(appState.layers[n]); appState.layers[n] = null; }
+        });
+      }
+
+      function addGeoLayer(name, feat) {
+        if (!feat) return;
+        if (appState.layers[name]) map.removeLayer(appState.layers[name]);
+        appState.layers[name] = L.geoJSON(feat, {
+          style: () => ({ color: colors[name].color, weight: 3, fillOpacity: colors[name].fillOpacity })
+        }).addTo(map);
+      }
+
+      document.getElementById('btnCompute').addEventListener('click', async () => {
+        if (!appState.inputGeoJSON) { alert('Please draw and Save your polygon first.'); return; }
+        clearDerivedLayers();
+        const payload = getFormValues();
+        try {
+          const res = await fetch('/compute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+          const data = await res.json();
+          if (!data.ok) { alert('Failed: ' + (data.error || 'unknown')); return; }
+
+          appState.zones = data.zones;
+          appState.exportParams = data.export_params;
+
+          // Add layers, but skip duplicating base layer if desired — here we add all returned
+          addGeoLayer('FG', data.zones.FG);
+          addGeoLayer('CV', data.zones.CV);
+          addGeoLayer('OV', data.zones.OV);
+          addGeoLayer('GRB', data.zones.GRB);
+
+          if (data.bounds) {
+            const b = data.bounds; // [minx,miny,maxx,maxy]
+            const sw = [b[1], b[0]], ne = [b[3], b[2]];
+            map.fitBounds([sw, ne], { padding: [20,20] });
+          }
+
+		  const btnDownload = document.getElementById('btnDownload');
+		  btnDownload.disabled = false;
+		  btnDownload.classList.remove('btn-outline-secondary');
+		  btnDownload.classList.add('btn-info');
+		  btnDownload.textContent = `Download KMZ (FG ${data.values.calculated_h_fg_m.toFixed(0)} m, CV ${data.values.h_cv_apex_m.toFixed(0)} m)`;
+
+          renderMetrics(data.values, data.metrics);
+        } catch (e) {
+          alert('Error: ' + e);
+        }
+      });
+
+      document.getElementById('btnDownload').addEventListener('click', async () => {
+        if (!appState.zones || !appState.exportParams) { alert('Nothing to export yet.'); return; }
+        try {
+          const res = await fetch('/download_kmz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zones: appState.zones, export_params: appState.exportParams }) });
+          if (!res.ok) { const t = await res.text(); alert('Export failed: ' + t); return; }
+          const blob = await res.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          const fg = appState.exportParams.h_fg_m.toFixed ? appState.exportParams.h_fg_m.toFixed(0) : appState.exportParams.h_fg_m;
+          const cv = appState.exportParams.h_cv_m.toFixed ? appState.exportParams.h_cv_m.toFixed(0) : appState.exportParams.h_cv_m;
+          a.download = `DOZE_zones_${new Date().toISOString().slice(0,16).replace(/[-:T]/g,'')}.kmz`;
+          document.body.appendChild(a); a.click(); a.remove(); window.URL.revokeObjectURL(url);
+        } catch (e) { alert('Error: ' + e); }
+      });
+
+      document.getElementById('btnClear').addEventListener('click', () => {
+        drawnItems.clearLayers();
+        clearDerivedLayers();
+        appState.inputGeoJSON = null;
+        appState.zones = null;
+        appState.exportParams = null;
+        document.getElementById('metrics').innerHTML = '';
+        document.getElementById('inputPreview').style.display = 'none';
+        const btnDownload = document.getElementById('btnDownload');
+		btnDownload.disabled = true;
+		//btnDownload.classList.add('btn-info');
+		btnDownload.textContent = 'Download KMZ';
+		const btnCompute = document.getElementById('btnCompute');
+		btnCompute.disabled = true;
+      });
+
+      function renderMetrics(values, metrics) {
+        const lines = [];
+        if (metrics.FG) lines.push(`<li><strong>FG</strong>: area ${metrics.FG.area_m2.toLocaleString()} m² • perimeter ${metrics.FG.perimeter_m.toLocaleString()} m</li>`);
+        if (metrics.CV) lines.push(`<li><strong>CV</strong>: area ${metrics.CV.area_m2.toLocaleString()} m² • perimeter ${metrics.CV.perimeter_m.toLocaleString()} m</li>`);
+        if (metrics.OV) lines.push(`<li><strong>OV</strong>: area ${metrics.OV.area_m2.toLocaleString()} m² • perimeter ${metrics.OV.perimeter_m.toLocaleString()} m</li>`);
+        if (metrics.GRB) lines.push(`<li><strong>GRB</strong>: area ${metrics.GRB.area_m2.toLocaleString()} m² • perimeter ${metrics.GRB.perimeter_m.toLocaleString()} m</li>`);
+
+        const warn = (parseFloat(document.getElementById('plannedFG').value) > values.calculated_h_fg_m + 1e-6)
+          ? `<div class="alert alert-warning mt-2">Planned FG reduced from ${parseFloat(document.getElementById('plannedFG').value).toFixed(1)} m to ${values.calculated_h_fg_m.toFixed(1)} m to keep CV apex ≤ 150 m.</div>`
+          : '';
+
+        const imposs = (values.calculated_h_fg_m <= 0)
+          ? `<div class="alert alert-danger mt-2">Flight not possible: buffer alone exceeds the CV ceiling of 150 m. Reduce speed or reaction time.</div>`
+          : '';
+
+        document.getElementById('metrics').innerHTML = `
+          <div class="row g-2">
+            <div class="col-12 col-xl-6">
+              <div class="card">
+                <div class="card-body">
+                  <h6 class="card-title">Calculated values</h6>
+                  <div class="row row-cols-2 g-2">
+                    <div class="col"><div class="text-muted">Lateral CV margin</div><div class="metric h5">${values.cv_m.toFixed(1)} m</div></div>
+                    <div class="col"><div class="text-muted">Planned FG (input)</div><div class="metric h5">${values.planned_fg_input_m.toFixed(1)} m</div></div>
+                    <div class="col"><div class="text-muted">Resulting FG apex H_FG</div><div class="metric h5">${values.calculated_h_fg_m.toFixed(1)} m</div></div>
+                    <div class="col"><div class="text-muted">Vertical Buffer</div><div class="metric h5">${values.vertical_buffer_m.toFixed(1)} m</div></div>
+                    <div class="col"><div class="text-muted">Resulting CV apex H_CV</div><div class="metric h5">${values.h_cv_apex_m.toFixed(1)} m</div></div>
+                    <div class="col"><div class="text-muted">GRB margin</div><div class="metric h5">${values.grb_margin.toFixed(1)} m</div></div>
+                  </div>
+                  ${warn}
+                  ${imposs}
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-6">
+              <div class="card h-100">
+                <div class="card-body">
+                  <h6 class="card-title">Areas & perimeters</h6>
+                  <ul class="mb-0">
+                    ${lines.join('')}
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>`;
+      }
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
