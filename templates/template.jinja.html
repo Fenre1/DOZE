@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-bs-theme="auto">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -16,9 +16,13 @@
     <script src="https://cdn.jsdelivr.net/npm/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 
     <style>
-      body { background: #f8f9fa; }
+      body {
+          background-color: var(--bs-body-bg);
+          color: var(--bs-body-color);
+          height: 100%;
+        }   
       .sidebar { width: 380px; } 
-	  #map { height: 650px; }      
+	  #map { height: 60vh; min-height: 360px}
       .metric { font-variant-numeric: tabular-nums; }
       code.small { font-size: .825rem; }
     </style>
@@ -26,8 +30,8 @@
   <body>
     <nav class="navbar navbar-expand-lg bg-body border-bottom sticky-top">
       <div class="container-fluid">
-        <span class="navbar-brand fw-semibold">DOZE — Drone Operation Zone Editor</span>
-        <span class="navbar-text">(Flask + Bootstrap 5.3)</span>
+        <span class="navbar-brand fw-semibold">DOZE — Drone Operation Zone Editor</span>        
+		<button class="btn btn-sm btn-outline-secondary" id="themeToggle">Dark mode</button>
       </div>
     </nav>
 
@@ -36,6 +40,27 @@
         <div class="col-12 col-lg-auto">
           <div class="card shadow-sm sidebar">
             <div class="card-body">
+              <div class="alert alert-primary mb-3">
+                 <h6 class="alert-heading mb-2">How to use</h6>
+                   <ol class="mb-0 ps-3">
+                    <li>Choose what your polygon represents: Flight Geometry (FG), Contingency Volume (CV), or Ground Risk Buffer (GRB).</li>
+                    <li>Set your expected max flight height.</li>
+                    <li>Draw the polygon with the tool.</li>
+                    <li>Click <strong>Save</strong>.</li>
+                    <li>Click <strong>Compute Zones</strong> to derive the other boundaries.</li>
+                    <li>Click <strong>Download KMZ</strong> and open it in Google Earth.</li>
+                  </ol>
+                </div>
+                
+                <div class="alert alert-warning mb-3 small">
+                  <strong>Important:</strong>
+                  This app is based on the
+                  <a href="https://www.lba.de/SharedDocs/Downloads/DE/B/B5_UAS/Leitfaden_FG_CV_GRB_eng.pdf"
+                     target="_blank" rel="noopener">LBA FG/CV/GRB guide</a>,
+                  itself derived from Regulation (EU) 2019/947.
+                  This application <strong>does not</strong> take into account where you are or aren’t allowed to fly. App is for multirotor only.
+                </div>
+            
               <h5 class="card-title">Drawing mode</h5>
               <div class="btn-group" role="group">
                 <input type="radio" class="btn-check" name="inputLayer" id="layerFG" autocomplete="off" value="FG" checked>
@@ -55,7 +80,7 @@
               </div>
 
               <hr>
-              <h5>Contingency Volume Calculator <small class="text-muted">(Multirotor)</small></h5>
+              <h5>Parameters <small class="text-muted">(Multirotor)</small></h5>
               <div class="mb-2">
                 <label class="form-label">Drone type</label>
                 <select class="form-select" id="droneProfile">
@@ -118,27 +143,43 @@
                 <button class="btn btn-primary" id="btnCompute">Compute Zones</button>
                 <button class="btn btn-info" id="btnDownload" disabled>Download KMZ</button>
                 <button class="btn btn-outline-danger" id="btnClear">Clear</button>
-              </div>
-
-              <hr>
-              <small class="text-muted">{{drivers_note}}</small>
+              </div>      
             </div>
           </div>
         </div>
-
+        
         <div class="col-12 col-lg">
           <div class="card shadow-sm">
             <div class="card-body">
               <div id="map" class="rounded"></div>
-              <div class="mt-3" id="metrics"></div>
-              <div class="mt-2" id="inputPreview" style="display:none"></div>
-              <div class="mt-3 text-muted small">© DOZE — Drone Operation Zone Editor</div>
+                  <div class="mt-2" id="metrics">
+                    <div class="row g-2">
+                      <div class="col-12 col-xl-6">
+                        <div class="card h-100">
+                          <div class="card-body text-muted">
+                            <h6 class="card-title mb-2">Calculated values</h6>
+                            <p class="mb-0"><em>Values will appear here after you compute zones.</em></p>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="col-12 col-xl-6">
+                        <div class="card h-100">
+                          <div class="card-body text-muted">
+                            <h6 class="card-title mb-2">Areas &amp; perimeters</h6>
+                            <p class="mb-0"><em>Results will be shown here.</em></p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+        
+                  <div class="mt-2" id="inputPreview" style="display:none"></div>
+                  <div class="mt-3 text-muted small">© DOZE — Drone Operation Zone Editor</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </div>
-
     <script>
       const DRONE_PROFILES = {{ drone_profiles | tojson }};
 
@@ -237,8 +278,6 @@
         const feat = latestPolygonFeature();
         if (!feat) { alert('Please draw a polygon first.'); return; }
         appState.inputGeoJSON = { type: 'Feature', properties: { name: appState.inputLayer, source: 'leaflet-draw' }, geometry: feat.geometry };
-        document.getElementById('inputPreview').style.display = 'block';
-        document.getElementById('inputPreview').innerHTML = `<h6>Current input polygon</h6><div>Layer: <strong>${appState.inputLayer}</strong></div><pre class="small bg-light p-2 border rounded"><code>${JSON.stringify({ type: appState.inputGeoJSON.geometry.type, coordinates: appState.inputGeoJSON.geometry.coordinates.slice(0,1) }, null, 2)}</code></pre>`;
 		document.getElementById('btnCompute').disabled = false;
         //alert(appState.inputLayer + ' saved to session.');
       });
@@ -391,5 +430,30 @@
     </script>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      // theme init
+      const userPref = localStorage.getItem('bs-theme') || 'auto';
+      document.documentElement.setAttribute('data-bs-theme', userPref);
+    
+      function setTheme(theme) {
+        document.documentElement.setAttribute('data-bs-theme', theme);
+        localStorage.setItem('bs-theme', theme);
+        // tell the map code below to swap tiles if needed
+        if (window.setMapTheme) setMapTheme(theme);
+      }
+    
+      document.getElementById('themeToggle').addEventListener('click', () => {
+        const current = document.documentElement.getAttribute('data-bs-theme') || 'auto';
+        const next = (current === 'dark') ? 'light' : 'dark';
+        setTheme(next);
+        document.getElementById('themeToggle').textContent = next === 'dark' ? 'Light mode' : 'Dark mode';
+      });
+    
+      // Label the toggle correctly on load
+      document.getElementById('themeToggle').textContent =
+        (document.documentElement.getAttribute('data-bs-theme') === 'dark') ? 'Light mode' : 'Dark mode';
+    </script>
+    	
+	
   </body>
 </html>

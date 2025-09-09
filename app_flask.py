@@ -46,11 +46,6 @@ GRB_PRISM_HEIGHT_M = 10.0  # height for GRB volume in KMZ, above 3D buildings
 
 WGS84 = "EPSG:4326"
 
-drivers_note = (
-    "Create a flight geometry - Based on https://www.lba.de/SharedDocs/Downloads/DE/B/B5_UAS/"
-    "Leitfaden_FG_CV_GRB_eng.pdf which are in turn based on Regulation (EU) 2019/947.\n"
-    "This application DOES NOT take into account locations where you are and are not allowed to fly."
-)
 
 DRONE_PROFILES = {
     "DJI Matrice 30": {
@@ -309,8 +304,7 @@ def index():
     return render_template(
         "template.jinja.html",
         drone_profiles=DRONE_PROFILES,
-        default_profile_name="DJI Matrice 30",
-        drivers_note=drivers_note,
+        default_profile_name="DJI Matrice 30"        
     )
 
 
