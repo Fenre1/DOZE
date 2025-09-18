@@ -1,21 +1,5 @@
 """
 DOZE — Drone Operation Zone Editor (Flask + Bootstrap 5.3)
-Single-file app.py so you can `python app.py` and go.
-
-Requires (pip install):
-  flask shapely pyproj simplekml
-
-This version uses Leaflet + Leaflet.Draw on the frontend (no Streamlit/Folium),
-mirrors the original calculations, and supports:
-- Draw/save a polygon (FG / CV / GRB)
-- Compute derived zones (FG, CV, OV, GRB)
-- Show metrics & fit-to-bounds
-- Download KMZ with proper 3D volumes (FG/CV/OV extruded to heights)
-
-Notes:
-- The UI is Bootstrap 5.3. We keep state on the client and POST to /compute and /download_kmz.
-- EPSG is chosen per-geometry via UTM from centroid, same idea as the original.
-- Colors and logic follow the original script closely.
 """
 from __future__ import annotations
 
@@ -48,24 +32,24 @@ WGS84 = "EPSG:4326"
 
 
 DRONE_PROFILES = {
-    "DJI Matrice 30": {
-        "v0_ms": 23.0,       # max groundspeed
-        "t_react_s": 1.0,    # reaction time
-        "theta_deg": 35.0,   # max pitch
-        "s_gps_m": 3.0,      # GPS inaccuracy
-        "s_pos_m": 0.3,      # position hold error
-        "s_map_m": 1.0,      # map error
-        "cd_m": 0.60,        # characteristic dimension (tip-to-tip)
+    "DJI Matrice 30 (N-mode)": {
+        "v0_ms": 23.0,       # max groundspeed in meter per second, S-mode, we should probably test or check app
+        "t_react_s": 1.0,    # reaction time in seconds
+        "theta_deg": 25.0,   # max pitch in degrees (tilt angle)
+        "s_gps_m": 3.0,      # GPS inaccuracy in meters
+        "s_pos_m": 0.3,      # position hold error in meters
+        "s_map_m": 1.0,      # map error in meters
+        "cd_m": 1.05,        # characteristic dimension (tip-to-tip) in meters
         "h_baro_mode": "Barometric (1 m)",
     },
-    "DJI Mavic 3": {
-        "v0_ms": 21.0,
+    "DJI Inspire 2 (P-mode, FVS enabled)": {
+        "v0_ms": 26.0, ## S-mode, we should probably test or check app 
         "t_react_s": 1.0,
-        "theta_deg": 35.0,
+        "theta_deg": 25.0, #
         "s_gps_m": 3.0,
         "s_pos_m": 0.3,
         "s_map_m": 1.0,
-        "cd_m": 0.38,
+        "cd_m": 1.00,
         "h_baro_mode": "Barometric (1 m)",
     },
 }
@@ -135,8 +119,6 @@ def _unproject_poly(poly: Polygon, to_wgs: Transformer) -> Polygon:
 
 
 def buffer_m(geom_wgs, radius_m: float, cap_style=1, join_style=1):
-    """Buffer (outward if >0, inward if <0) in metres using a local UTM, then return WGS84 geometry."""
-    # OLD: if radius_m <= 0: return geom_wgs
     if abs(radius_m) < 1e-9:
         return geom_wgs
 
@@ -196,7 +178,6 @@ def area_perimeter_m(geom_wgs) -> Tuple[float, float, str]:
 # ---------- KMZ helpers ----------
 
 def _kml_color(hex_rgb: str, opacity: float = 0.6) -> str:
-    """Convert '#RRGGBB' + opacity [0..1] to KML aabbggrr (little-endian ARGB)."""
     hex_rgb = hex_rgb.lstrip("#")
     r = int(hex_rgb[0:2], 16)
     g = int(hex_rgb[2:4], 16)
@@ -330,7 +311,6 @@ def compute():
 
         cv_m = cv_lateral_multirotor(v0_ms, t_react_s, theta_deg, s_gps_m, s_pos_m, s_map_m)
 
-        # Vertical buffer components (display only)
         h_rz = v0_ms * 0.7 * max(0.0, t_react_s)
         h_cm = 0.5 * ((v0_ms ** 2) / (2.0 * G))
         vertical_buffer_m = h_baro_m + h_rz + h_cm
@@ -352,7 +332,7 @@ def compute():
         if base_layer == "FG":
             fg_geom = base_geom
             cv_geom = buffer_m(fg_geom, cv_m, cap_style=1, join_style=1)
-            ov_geom = cv_geom  # equals CV in this model
+            ov_geom = cv_geom  
             grb_geom = buffer_m(ov_geom, grb_margin, cap_style=1, join_style=1)
         
         elif base_layer == "CV":
