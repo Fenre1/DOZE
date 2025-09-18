@@ -285,7 +285,7 @@ def index():
     return render_template(
         "template.jinja.html",
         drone_profiles=DRONE_PROFILES,
-        default_profile_name="DJI Matrice 30"        
+        default_profile_name="DJI Matrice 30 (N-mode)"        
     )
 
 
