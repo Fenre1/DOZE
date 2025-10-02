@@ -18,6 +18,8 @@ from shapely.validation import make_valid
 from pyproj import Transformer
 import simplekml
 
+from caat_high_angle import Inputs as HighAngleInputs, compute_critical_area_high_angle
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "dev-doze-secret"
 
@@ -40,6 +42,8 @@ DRONE_PROFILES = {
         "s_pos_m": 0.3,      # position hold error in meters
         "s_map_m": 1.0,      # map error in meters
         "cd_m": 1.05,        # characteristic dimension (tip-to-tip) in meters
+        "mass_kg": 4.07,     # Mass of dronein kg. DOUBLE CHECK
+        "drag_cd": 0.8,      # should be fixed param
         "h_baro_mode": "Barometric (1 m)",
     },
     "DJI Inspire 2 (P-mode, FVS enabled)": {
@@ -50,6 +54,8 @@ DRONE_PROFILES = {
         "s_pos_m": 0.3,
         "s_map_m": 1.0,
         "cd_m": 1.00,
+        "mass_kg": 3.44,
+        "drag_cd": 0.8,        
         "h_baro_mode": "Barometric (1 m)",
     },
 }
@@ -304,6 +310,8 @@ def compute():
         s_pos_m = float(data.get("s_pos_m", 0.3))
         s_map_m = float(data.get("s_map_m", 1.0))
         cd_m = float(data.get("cd_m", 0.6))
+        mass_kg = float(data.get("mass_kg", 4.0))
+        drag_cd = float(data.get("drag_cd", 0.8))        
         h_baro_mode = str(data.get("h_baro_mode", "Barometric (1 m)"))
         grb_method = str(data.get("grb_method", "Ballistic"))
 
@@ -320,11 +328,17 @@ def compute():
         calculated_h_fg_m = max(0.0, min(fg_user_capped, allowed_fg_by_cv))
         h_cv_apex_m = calculated_h_fg_m + vertical_buffer_m
 
-        if grb_method.lower().startswith("simplified"):
+        grb_method_key = grb_method.strip().lower()
+        high_angle_details = None
+
+        if grb_method_key.startswith("simplified"):
             grb_margin = grb_simplified(h_cv_apex_m, cd_m)
+        elif grb_method_key.startswith("high"):
+            high_angle_inputs = HighAngleInputs(m=mass_kg, w=cd_m, CD=max(1e-6, drag_cd))
+            high_angle_details = compute_critical_area_high_angle(high_angle_inputs)
+            grb_margin = float(high_angle_details["AC_equiv_radius_m"])
         else:
             grb_margin = grb_ballistic(v0_ms, h_cv_apex_m, cd_m)
-
         base_geom = geojson_to_shapely_wgs(feature)
 
         fg_geom = cv_geom = ov_geom = grb_geom = None
@@ -394,6 +408,8 @@ def compute():
             "s_map_m": s_map_m,
             "cv_m": round(cv_m, 2),
             "cd_m": cd_m,
+            "mass_kg": mass_kg,
+            "drag_cd": drag_cd,            
             "grb_method": grb_method,
             "grb_margin_m": round(grb_margin, 2),
             "crs_buffering": crs_used or "local UTM",
@@ -401,6 +417,19 @@ def compute():
             "base_layer": base_layer,
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+
+        if high_angle_details:
+            export_params["high_angle_details"] = {
+                "A_frontal_m2": round(high_angle_details["A_frontal_m2"], 3),
+                "CD_used": high_angle_details["CD_used"],
+                "rho_kg_m3": high_angle_details["rho_kg_m3"],
+                "V_terminal_mps": round(high_angle_details["V_terminal_mps"], 2),
+                "E_terminal_J": round(high_angle_details["E_terminal_J"], 1),
+                "Fs_used": round(high_angle_details["Fs_used"], 2),
+                "rD_m": round(high_angle_details["rD_m"], 3),
+                "AC_m2": round(high_angle_details["AC_m2"], 2),
+                "AC_equiv_radius_m": round(high_angle_details["AC_equiv_radius_m"], 2),
+            }
 
         return jsonify({
             "ok": True,
@@ -415,6 +444,19 @@ def compute():
                 "vertical_buffer_m": round(vertical_buffer_m, 2),
                 "h_cv_apex_m": round(h_cv_apex_m, 2),
                 "grb_margin": round(grb_margin, 2),
+                "grb_method": grb_method,
+                "high_angle": (
+                    None
+                    if not high_angle_details
+                    else {
+                        "vt_mps": round(high_angle_details["V_terminal_mps"], 2),
+                        "energy_j": round(high_angle_details["E_terminal_J"], 1),
+                        "fs": round(high_angle_details["Fs_used"], 2),
+                        "ac_m2": round(high_angle_details["AC_m2"], 2),
+                        "ac_radius_m": round(high_angle_details["AC_equiv_radius_m"], 2),
+                        "frontal_area_m2": round(high_angle_details["A_frontal_m2"], 3),
+                    }
+                ),
             },
         })
     except Exception as e:
