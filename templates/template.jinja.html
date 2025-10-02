@@ -427,10 +427,11 @@
                       <div class="col-12"><hr class="my-1"></div>
                       <div class="col"><div class="text-muted">High-angle V<sub>t</sub></div><div class="metric h5">${values.high_angle.vt_mps.toFixed(1)} m/s</div></div>
                       <div class="col"><div class="text-muted">Impact energy</div><div class="metric h5">${values.high_angle.energy_j.toLocaleString(undefined,{maximumFractionDigits:0})} J</div></div>
-                      <div class="col"><div class="text-muted">Critical area</div><div class="metric h5">${values.high_angle.ac_m2.toLocaleString(undefined,{maximumFractionDigits:1})} m²</div></div>
+                      <div class="col"><div class="text-muted">Critical area</div><div class="metric h5">${values.high_angle.ac_m2.toLocaleString(undefined,{maximumFractionDigits:2})} m²</div></div>
+                      <div class="col"><div class="text-muted">AC eq. radius</div><div class="metric h5">${values.high_angle.ac_radius_m.toFixed(1)} m</div></div>
                       <div class="col"><div class="text-muted">Safety factor F<sub>s</sub></div><div class="metric h5">${values.high_angle.fs.toFixed(2)}</div></div>
                       <div class="col"><div class="text-muted">Annex F area</div><div class="metric h5">${values.high_angle.frontal_area_m2.toFixed(2)} m²</div></div>
-                    ` : ''}                    
+                    ` : ''}
                   </div>
                   ${warn}
                   ${imposs}
